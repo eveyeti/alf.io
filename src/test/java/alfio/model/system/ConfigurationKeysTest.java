@@ -19,11 +19,50 @@ package alfio.model.system;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class ConfigurationKeysTest {
+
+    private static final List<String> BANCHILE_KEY_NAMES = List.of(
+        "BANCHILE_ENABLED",
+        "BANCHILE_LOGIN",
+        "BANCHILE_TRANKEY",
+        "BANCHILE_WEBHOOK_SECRET",
+        "BANCHILE_BASE_URL"
+    );
+
+    @Test
+    void banchileKeysCanBeLookedUpByName() {
+        for (String keyName : BANCHILE_KEY_NAMES) {
+            var key = ConfigurationKeys.safeValueOf(keyName);
+            assertNotEquals(ConfigurationKeys.NOT_RECOGNIZED, key,
+                keyName + " should be a recognized ConfigurationKeys entry");
+        }
+    }
+
+    @Test
+    void banchileKeysCategoryIsPaymentBanchile() {
+        for (String keyName : BANCHILE_KEY_NAMES) {
+            var key = ConfigurationKeys.safeValueOf(keyName);
+            assertEquals(ConfigurationKeys.SettingCategory.PAYMENT_BANCHILE, key.getCategory(),
+                keyName + " should belong to PAYMENT_BANCHILE category");
+        }
+    }
+
+    @Test
+    void banchileSecretKeysUseTextComponentType() {
+        // BANCHILE_TRANKEY and BANCHILE_WEBHOOK_SECRET must use TEXT component type
+        // (same pattern as MOLLIE_API_KEY, STRIPE_SECRET_KEY — no PASSWORD type exists)
+        var tranKey = ConfigurationKeys.safeValueOf("BANCHILE_TRANKEY");
+        var webhookSecret = ConfigurationKeys.safeValueOf("BANCHILE_WEBHOOK_SECRET");
+        assertEquals(ComponentType.TEXT, tranKey.getComponentType(),
+            "BANCHILE_TRANKEY should use ComponentType.TEXT");
+        assertEquals(ComponentType.TEXT, webhookSecret.getComponentType(),
+            "BANCHILE_WEBHOOK_SECRET should use ComponentType.TEXT");
+    }
 
     @Test
     void validateAllBooleansHaveDefaultValue() {

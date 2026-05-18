@@ -283,7 +283,14 @@ public enum ConfigurationKeys {
     OPENID_PUBLIC_ENABLED("Enable OpenID for public users (default: false)", false, SettingCategory.OPENID, ComponentType.BOOLEAN, false, EnumSet.of(SYSTEM), BooleanUtils.FALSE),
     OPENID_CONFIGURATION_JSON("OpenID configuration", false, SettingCategory.OPENID, ComponentType.TEXTAREA, false, EnumSet.of(SYSTEM)),
 
-    GENERATE_TICKETS_FOR_SUBSCRIPTIONS("Generate and send tickets automatically to subscription holders for compatible events (default: false)", false, SettingCategory.SUBSCRIPTIONS, ComponentType.BOOLEAN, false, EnumSet.of(SYSTEM, ORGANIZATION, PURCHASE_CONTEXT), BooleanUtils.FALSE)
+    GENERATE_TICKETS_FOR_SUBSCRIPTIONS("Generate and send tickets automatically to subscription holders for compatible events (default: false)", false, SettingCategory.SUBSCRIPTIONS, ComponentType.BOOLEAN, false, EnumSet.of(SYSTEM, ORGANIZATION, PURCHASE_CONTEXT), BooleanUtils.FALSE),
+
+    // Banchile Pagos Web Checkout
+    BANCHILE_ENABLED("Banchile Pagos enabled (default false)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.BOOLEAN, false, EnumSet.of(SYSTEM, ORGANIZATION, PURCHASE_CONTEXT), BooleanUtils.FALSE),
+    BANCHILE_LOGIN("Banchile public login ID (32-char hex)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
+    BANCHILE_TRANKEY("Banchile secret tranKey used for SHA1 signature", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
+    BANCHILE_WEBHOOK_SECRET("Banchile webhook signing secret for inbound webhook validation", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM)),
+    BANCHILE_BASE_URL("Banchile API base URL (sandbox: https://checkout.test.banchilepagos.cl, prod: https://api.banchilepagos.cl)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM))
     ;
 
     @Getter
@@ -297,6 +304,7 @@ public enum ConfigurationKeys {
         PAYMENT_PAYPAL("PayPal settings"),
         PAYMENT_OFFLINE("Offline payment settings"),
         PAYMENT_MOLLIE("Mollie settings"),
+        PAYMENT_BANCHILE("Banchile Pagos settings"),
         INVOICE("Invoice settings"),
         INVOICE_EU("Invoice VAT application settings"),
         MAIL("E-Mail settings"),
