@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60" viewBox="0 0 200 60">
+  <!-- TODO: Reemplazar con logo oficial de Banchile Pagos -->
+  <rect width="200" height="60" rx="4" fill="#003366"/>
+  <text x="100" y="35" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">Banchile Pagos</text>
+</svg>

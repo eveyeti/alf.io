@@ -96,7 +96,7 @@ export type EventFormat = 'IN_PERSON' | 'ONLINE' | 'HYBRID';
 
 export type PaymentMethod = 'CREDIT_CARD' | 'PAYPAL' | 'IDEAL' | 'BANK_TRANSFER' | 'ON_SITE'
                             | 'APPLE_PAY' | 'BANCONTACT' | 'ING_HOME_PAY' | 'BELFIUS' | 'PRZELEWY_24' | 'KBC' | 'NONE';
-export type PaymentProxy = 'STRIPE' | 'ON_SITE' | 'OFFLINE' | 'PAYPAL' | 'MOLLIE' | 'SAFERPAY';
+export type PaymentProxy = 'STRIPE' | 'ON_SITE' | 'OFFLINE' | 'PAYPAL' | 'MOLLIE' | 'SAFERPAY' | 'BANCHILE';
 export interface PaymentMethodDetails {
     labelKey: string;
     icon: [IconPrefix, IconName];
