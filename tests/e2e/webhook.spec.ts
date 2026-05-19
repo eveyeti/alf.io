@@ -107,9 +107,6 @@ function curlWebhook(reservationId: string, body: string, baseUrl?: string): num
  * Cuando se implemente el controller, la aserción cambiará a esperar 200/400.
  */
 test('webhook: endpoint responde a llamadas POST (CSRF exempt)', async () => {
-  // URL correcta según WEBHOOK_URL_TEMPLATE del manager
-  const CORRECT_URL = `${ALFIO_BASE}/api/payment/webhook/banchile/reservation/${FAKE_RESERVATION_ID}`;
-
   const payload = buildWebhookPayload({ signature: 'INVALID_SIGNATURE_TEST' });
   const status = curlWebhook(FAKE_RESERVATION_ID, payload, ALFIO_BASE);
 

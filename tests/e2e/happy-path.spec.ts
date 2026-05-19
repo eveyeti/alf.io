@@ -117,7 +117,7 @@ test('happy path: redirect "Volver al comercio" apunta a returnUrl', async ({ pa
   // Para verificar el redirect real, navegar y ver a dónde va
   // Nota: localhost:8080/event/.../reservation/REDIRECT_TEST/book retornará 404
   // porque REDIRECT_TEST no es un ID real, pero el redirect debería ocurrir
-  const [response] = await Promise.all([
+  await Promise.all([
     page.waitForResponse(
       (resp) => resp.url().includes('localhost:8080'),
       { timeout: 15000 }

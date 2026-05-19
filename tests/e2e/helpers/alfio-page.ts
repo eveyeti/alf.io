@@ -4,7 +4,7 @@
  * Encapsula la navegación, llenado de formularios y aserciones específicas
  * de Alfio (Angular SPA, CSRF, sesión).
  */
-import { type Page, expect } from '@playwright/test';
+import { type Page } from '@playwright/test';
 
 const ALFIO_BASE = process.env.ALFIO_BASE_URL ?? 'http://localhost:8080';
 const EVENT_SLUG = process.env.EVENT_SLUG ?? 'tributo_soda';
