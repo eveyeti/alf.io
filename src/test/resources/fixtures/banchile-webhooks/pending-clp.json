@@ -1,0 +1,11 @@
+{
+  "_comment": "SYNTHETIC — replace with real webhook capture in Phase H (certificación Banchile). Modelado sobre la respuesta de querySession observada en smoke test 2026-05-14. Banchile puede enviar PENDING cuando el usuario aún no ha completado el pago en el checkout.",
+  "requestId": 12347,
+  "reference": "VIAGGIO-RES-D5E6",
+  "status": {
+    "status": "PENDING",
+    "reason": "PC",
+    "message": "Pending payment",
+    "date": "2026-05-20T15:40:00+00:00"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "_comment": "SYNTHETIC — replace with real webhook capture in Phase H (certificación Banchile). Modelado sobre la respuesta de querySession observada en smoke test 2026-05-14.",
+  "requestId": 12345,
+  "reference": "VIAGGIO-RES-A1B2",
+  "status": {
+    "status": "APPROVED",
+    "reason": "00",
+    "message": "Approved",
+    "date": "2026-05-20T15:30:00+00:00"
+  },
+  "payment": {
+    "method": "VISA",
+    "authorization": "685559",
+    "amount": {
+      "currency": "CLP",
+      "total": 10000
+    }
+  }
+}

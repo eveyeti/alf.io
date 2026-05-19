@@ -1,0 +1,19 @@
+{
+  "_comment": "SYNTHETIC — replace with real webhook capture in Phase H (certificación Banchile). APPROVED_PARTIAL no está soportado en MVP; el manager lo trata como PENDING con un log warning hasta resolución manual.",
+  "requestId": 12348,
+  "reference": "VIAGGIO-RES-F7G8",
+  "status": {
+    "status": "APPROVED_PARTIAL",
+    "reason": "00",
+    "message": "Approved partial",
+    "date": "2026-05-20T15:45:00+00:00"
+  },
+  "payment": {
+    "method": "VISA",
+    "authorization": "685560",
+    "amount": {
+      "currency": "CLP",
+      "total": 5000
+    }
+  }
+}
