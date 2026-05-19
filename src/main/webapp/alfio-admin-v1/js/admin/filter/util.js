@@ -8,7 +8,8 @@
         'OFFLINE'  : 'Offline payment (bank transfer, invoice, etc.)',
         'PAYPAL'   : 'PayPal',
         'MOLLIE'   : 'Mollie: Credit cards, iDEAL, Bancontact, ING Home Pay, Belfius, KBC/CBC, Przelewy24',
-        'SAFERPAY' : 'Saferpay By SIX Payments'
+        'SAFERPAY' : 'Saferpay By SIX Payments',
+        'BANCHILE' : 'Banchile Pagos: Tarjetas de crédito/débito (Banco de Chile, Chile)'
     });
 
     filters.filter('printSelectedOrganization', function() {
