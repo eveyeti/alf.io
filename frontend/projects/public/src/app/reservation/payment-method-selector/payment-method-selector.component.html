@@ -60,6 +60,11 @@
                 [method]="selectedPaymentMethod"
                 (paymentProvider)="registerCurrentPaymentProvider($event)">
             </app-mollie-payment-proxy>
+            <app-banchile-payment-proxy
+                [proxy]="selectedPaymentProxy"
+                [method]="selectedPaymentMethod"
+                (paymentProvider)="registerCurrentPaymentProvider($event)">
+            </app-banchile-payment-proxy>
             <app-saferpay-payment-proxy
               [proxy]="selectedPaymentProxy"
               [method]="selectedPaymentMethod"
