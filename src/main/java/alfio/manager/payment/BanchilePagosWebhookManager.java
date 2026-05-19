@@ -170,8 +170,10 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
             // Construir el cuerpo de la request
             Auth auth = BanchilePagosClient.buildAuth(login, tranKey);
-            String reference = reservationId; // usamos el reservationId como referencia interna
-            String description = "Reserva " + reservationId;
+            // Banchile rechaza UUIDs con dashes ("reference" inválido). Strip dashes para mantener
+            // solo 32 chars hex — sigue siendo único y mapeable de vuelta al reservationId completo.
+            String reference = reservationId.replace("-", "");
+            String description = "Reserva " + reference;
             String currency = purchaseContext.getCurrency();
             long totalCents = spec.getPriceWithVAT();
             // Banchile espera el total en unidades enteras (CLP no usa decimales)
@@ -492,12 +494,13 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                 return Optional.empty();
             }
 
-            // Extraer monto aprobado si está disponible
+            // Extraer monto aprobado si está disponible (payment es ARRAY en respuestas de Banchile)
             String paidAmount = null;
-            if (remoteSession.payment() != null && remoteSession.payment().amount() != null) {
+            var approved = remoteSession.firstApprovedPayment();
+            if (approved != null && approved.amount() != null) {
                 paidAmount = MonetaryUtil.formatCents(
-                    (int) remoteSession.payment().amount().total(),
-                    remoteSession.payment().amount().currency()
+                    (int) approved.amount().total(),
+                    approved.amount().currency()
                 );
             }
 

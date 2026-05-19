@@ -238,17 +238,19 @@ class BanchilePagosClientTest {
                             "message": "Aprobada",
                             "date": "2026-05-18T01:00:00-04:00"
                           },
-                          "payment": {
-                            "reference": "REF-003",
-                            "amount": { "currency": "CLP", "total": 10000 },
-                            "receipt": "1234567890",
-                            "status": {
-                              "status": "APPROVED",
-                              "reason": "00",
-                              "message": "Aprobada",
-                              "date": "2026-05-18T01:00:00-04:00"
+                          "payment": [
+                            {
+                              "reference": "REF-003",
+                              "amount": { "currency": "CLP", "total": 10000 },
+                              "receipt": "1234567890",
+                              "status": {
+                                "status": "APPROVED",
+                                "reason": "00",
+                                "message": "Aprobada",
+                                "date": "2026-05-18T01:00:00-04:00"
+                              }
                             }
-                          }
+                          ]
                         }
                         """)
             );
@@ -263,6 +265,7 @@ class BanchilePagosClientTest {
         assertEquals("APPROVED", response.status().status(),
             "status.status debe ser APPROVED");
         assertNotNull(response.payment(), "payment debe estar presente en respuesta APPROVED");
-        assertEquals("REF-003", response.payment().reference());
+        assertEquals(1, response.payment().size(), "debe haber exactamente 1 intento de pago");
+        assertEquals("REF-003", response.payment().get(0).reference());
     }
 }

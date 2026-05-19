@@ -16,6 +16,8 @@
  */
 package alfio.model.transaction.banchile;
 
+import java.util.List;
+
 /**
  * DTO para la respuesta de Banchile Pagos en createSession y querySession.
  *
@@ -32,14 +34,28 @@ package alfio.model.transaction.banchile;
  * @param status     Estado de la operación
  * @param requestId  ID numérico de la sesión (solo presente en createSession)
  * @param processUrl URL del checkout para redirigir al comprador (solo en createSession)
- * @param payment    Detalles del pago (presente cuando status = APPROVED)
+ * @param payment    Lista de intentos de pago. Banchile retorna ARRAY (no objeto único)
+ *                   porque una sesión puede tener múltiples intentos (retries tras rechazo).
+ *                   Para una sesión APPROVED, normalmente hay 1 elemento con status APPROVED.
+ *                   En createSession suele venir null.
  */
 public record SessionResponse(
     Status status,
     Integer requestId,
     String processUrl,
-    PaymentDetails payment
+    List<PaymentDetails> payment
 ) {
+
+    /**
+     * Helper: el primer pago APPROVED de la lista, o null si no hay ninguno.
+     */
+    public PaymentDetails firstApprovedPayment() {
+        if (payment == null) return null;
+        return payment.stream()
+            .filter(p -> p.status() != null && "APPROVED".equals(p.status().status()))
+            .findFirst()
+            .orElse(null);
+    }
 
     /**
      * Estado de la respuesta de Banchile.

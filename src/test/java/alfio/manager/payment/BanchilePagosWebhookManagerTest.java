@@ -379,7 +379,7 @@ class BanchilePagosWebhookManagerTest {
             new SessionResponse.Status("APPROVED", "00", "Aprobado", "2026-05-18T10:00:00-04:00"),
             REQUEST_ID_INT,
             null,
-            paymentDetails
+            java.util.List.of(paymentDetails)
         );
         when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL)))
             .thenReturn(remoteSession);
