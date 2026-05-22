@@ -200,7 +200,7 @@
         </div>
 
 
-        <div class="page-header" id="PAYMENT" data-ng-if="systemConf.payment || systemConf.paymentPaypal || systemConf.paymentStripe || systemConf.paymentMollie || systemConf.paymentOffline || systemConf.paymentSaferpay">
+        <div class="page-header" id="PAYMENT" data-ng-if="systemConf.payment || systemConf.paymentPaypal || systemConf.paymentStripe || systemConf.paymentMollie || systemConf.paymentOffline || systemConf.paymentSaferpay || systemConf.paymentBanchile">
             <h2>Payment</h2>
             <span>Payment provider settings</span>
         </div>
@@ -303,6 +303,20 @@
             </div>
         </div>
 
+        <div data-ng-if="systemConf.paymentBanchile" class="panel panel-default">
+            <div class="panel-heading">
+                <div class="panel-title"><i class="fa fa-credit-card"></i> Banchile Pagos</div>
+            </div>
+            <div class="panel-body">
+                <div class="alert alert-info">
+                    <i class="fa fa-info-circle"></i> Pagos con tarjeta vía Banchile Pagos Web Checkout (Banco de Chile). El <strong>secret key</strong> que provee Banchile firma tanto las peticiones API (auth) como los webhooks entrantes (SHA-256). La URL base solo se setea a nivel SYSTEM.
+                </div>
+                <div data-ng-repeat="setting in systemConf.paymentBanchile.settings">
+                    <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+                </div>
+            </div>
+        </div>
+
         <div class="page-header" id="IMPORT_ATTENDEES">
             <h2>Import Attendees</h2>
         </div>
@@ -324,7 +338,7 @@
             </div>
         </div>
 
-        <div class="page-header" data-ng-if="systemConf.payment || systemConf.paymentPaypal || systemConf.paymentStripe || systemConf.paymentMollie || systemConf.paymentOffline">
+        <div class="page-header" data-ng-if="systemConf.payment || systemConf.paymentPaypal || systemConf.paymentStripe || systemConf.paymentMollie || systemConf.paymentOffline || systemConf.paymentSaferpay || systemConf.paymentBanchile">
             <h2>Alf.io PI settings</h2>
         </div>
         <div data-ng-if="systemConf.alfioPi" class="panel panel-default">

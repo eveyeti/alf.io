@@ -134,7 +134,7 @@
             </div>
             <regenerate-invoices data-event="eventConf.event"></regenerate-invoices>
 
-            <div class="page-header" id="PAYMENT" data-ng-if="eventConf.payment || eventConf.paymentPaypal || eventConf.paymentStripe || eventConf.paymentMollie || eventConf.paymentOffline">
+            <div class="page-header" id="PAYMENT" data-ng-if="eventConf.payment || eventConf.paymentPaypal || eventConf.paymentStripe || eventConf.paymentMollie || eventConf.paymentOffline || eventConf.paymentSaferpay || eventConf.paymentBanchile">
                 <h2>Payment</h2>
                 <span>Payment provider settings</span>
             </div>
@@ -193,6 +193,20 @@
                 </div>
             </div>-->
 
+            <div data-ng-if="eventConf.paymentBanchile" class="panel panel-default">
+                <div class="panel-heading">
+                    <div class="panel-title"><i class="fa fa-credit-card"></i> Banchile Pagos</div>
+                </div>
+                <div class="panel-body">
+                    <div class="alert alert-info">
+                        <i class="fa fa-info-circle"></i> Habilita Banchile Pagos para este evento. Las credenciales (login + secret key) se configuran a nivel de organización o sistema. El secret key firma tanto las peticiones API como los webhooks entrantes (SHA-256).
+                    </div>
+                    <div data-ng-repeat="setting in eventConf.paymentBanchile.settings">
+                        <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="eventConf.delete(config)"></setting>
+                    </div>
+                </div>
+            </div>
+
             <div data-ng-if="eventConf.paymentOffline" class="panel panel-default">
                 <div class="panel-heading">
                     <div class="panel-title"><i class="fa fa-exchange"></i> Bank Transfer payment configuration</div>
@@ -233,7 +247,7 @@
                 </div>
             </div>
 
-            <div class="page-header" data-ng-if="eventConf.payment || eventConf.paymentPaypal || eventConf.paymentStripe || eventConf.paymentMollie || eventConf.paymentOffline">
+            <div class="page-header" data-ng-if="eventConf.payment || eventConf.paymentPaypal || eventConf.paymentStripe || eventConf.paymentMollie || eventConf.paymentOffline || eventConf.paymentSaferpay || eventConf.paymentBanchile">
                 <h2>Check-in settings</h2>
             </div>
             <div data-ng-if="eventConf.alfioPi" class="panel panel-default">

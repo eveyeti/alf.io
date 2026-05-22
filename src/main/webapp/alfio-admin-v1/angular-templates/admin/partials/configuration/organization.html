@@ -132,7 +132,7 @@
                 </div>
 
 
-                <div class="page-header" id="PAYMENT" data-ng-if="organizationConf.payment || organizationConf.paymentPaypal || organizationConf.paymentStripe || organizationConf.paymentMollie || organizationConf.paymentOffline || organizationConf.paymentSaferpay">
+                <div class="page-header" id="PAYMENT" data-ng-if="organizationConf.payment || organizationConf.paymentPaypal || organizationConf.paymentStripe || organizationConf.paymentMollie || organizationConf.paymentOffline || organizationConf.paymentSaferpay || organizationConf.paymentBanchile">
                     <h2>Payment</h2>
                     <span>Payment provider settings</span>
                 </div>
@@ -252,6 +252,20 @@
                     </div>
                 </div>
 
+                <div data-ng-if="organizationConf.paymentBanchile" class="panel panel-default">
+                    <div class="panel-heading">
+                        <div class="panel-title"><i class="fa fa-credit-card"></i> Banchile Pagos</div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="alert alert-info">
+                            <i class="fa fa-info-circle"></i> Pagos con tarjeta vía Banchile Pagos Web Checkout (Banco de Chile). Define las credenciales (login + secret key) a nivel de organización para que apliquen a todos los eventos de esta entidad. El secret key firma tanto las peticiones API como los webhooks entrantes (SHA-256).
+                        </div>
+                        <div data-ng-repeat="setting in organizationConf.paymentBanchile.settings">
+                            <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="organizationConf.delete(config)"  ></setting>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="page-header" id="SUBSCRIPTIONS">
                     <h2>Subscriptions</h2>
                 </div>
@@ -264,7 +278,7 @@
                     </div>
                 </div>
 
-                <div class="page-header" data-ng-if="organizationConf.payment || organizationConf.paymentPaypal || organizationConf.paymentStripe || organizationConf.paymentMollie || organizationConf.paymentOffline">
+                <div class="page-header" data-ng-if="organizationConf.payment || organizationConf.paymentPaypal || organizationConf.paymentStripe || organizationConf.paymentMollie || organizationConf.paymentOffline || organizationConf.paymentSaferpay || organizationConf.paymentBanchile">
                     <h2>Alf.io PI settings</h2>
                 </div>
                 <div data-ng-if="organizationConf.alfioPi" class="panel panel-default">
