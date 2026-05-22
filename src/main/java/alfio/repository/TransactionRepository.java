@@ -120,6 +120,11 @@ public interface TransactionRepository {
                                                                        @Bind("status") Transaction.Status status,
                                                                        @Bind("paymentProxy")PaymentProxy paymentProxy);
 
+    @Query("select * from b_transaction where status = :status and payment_proxy = :paymentProxy " +
+        "and status not in ('INVALID', 'OFFLINE_DISABLE_MATCH') order by t_timestamp asc")
+    List<Transaction> findByStatusAndPaymentProxy(@Bind("status") Transaction.Status status,
+                                                  @Bind("paymentProxy") PaymentProxy paymentProxy);
+
     @Query("select * from b_transaction where id = :id and status = :status")
     Optional<Transaction> loadOptionalByIdAndStatus(@Bind("id") int id, @Bind("status") Transaction.Status status);
 
