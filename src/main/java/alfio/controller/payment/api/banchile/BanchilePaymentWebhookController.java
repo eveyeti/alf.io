@@ -25,8 +25,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -42,6 +42,11 @@ import static alfio.manager.payment.BanchilePagosWebhookManager.WEBHOOK_URL_TEMP
  * createSession — la URL del webhook se registra UNA sola vez en el panel de comercios,
  * sin placeholders dinámicos. Por eso el endpoint es fijo y el reservationId se extrae
  * del campo {@code reference} del body (UUID sin guiones, 32 chars hex).
+ *
+ * <p>Política de respuestas: el endpoint SIEMPRE responde 200 OK, incluso ante bodies
+ * malformados o reservas no encontradas. Banchile no reintenta webhooks (doc oficial),
+ * así que un 4xx/5xx solo perdería la notificación sin beneficio. El polling
+ * server-side reconcilia el estado de cualquier forma. Los errores se loguean como warn.
  */
 @RestController
 @AllArgsConstructor
@@ -53,8 +58,22 @@ public class BanchilePaymentWebhookController {
     private final PurchaseContextManager purchaseContextManager;
     private final ObjectMapper objectMapper;
 
+    /**
+     * Endpoint GET para health-check / verificación de la URL en el panel de comercios.
+     * Banchile durante onboarding y certificación verifica que la URL existe.
+     */
+    @GetMapping(WEBHOOK_URL_TEMPLATE)
+    public ResponseEntity<String> health() {
+        return ResponseEntity.ok("OK");
+    }
+
     @PostMapping(WEBHOOK_URL_TEMPLATE)
-    public ResponseEntity<String> receivePaymentConfirmation(@RequestBody String body) {
+    public ResponseEntity<String> receivePaymentConfirmation(@RequestBody(required = false) String body) {
+        if (body == null || body.isBlank()) {
+            log.warn("Webhook Banchile con body vacío — respondiendo 200 (probable ping de verificación)");
+            return ResponseEntity.ok("empty body ignored");
+        }
+
         String reservationId;
         try {
             JsonNode root = objectMapper.readTree(body);
@@ -62,12 +81,12 @@ public class BanchilePaymentWebhookController {
             reservationId = reservationIdFromReference(reference);
         } catch (Exception e) {
             log.warn("Webhook Banchile con body malformado: {}", e.getMessage());
-            return ResponseEntity.badRequest().body("malformed body");
+            return ResponseEntity.ok("malformed body ignored");
         }
 
         if (reservationId == null) {
             log.warn("Webhook Banchile sin reference válida en el body");
-            return ResponseEntity.badRequest().body("missing reference");
+            return ResponseEntity.ok("missing reference ignored");
         }
 
         final String resId = reservationId;
@@ -80,16 +99,15 @@ public class BanchilePaymentWebhookController {
                     Map.of("reservationId", resId),
                     new PaymentContext(purchaseContext, resId)
                 );
-                if (result.isSuccessful()) {
-                    return ResponseEntity.ok("OK");
-                } else if (result.isError()) {
-                    return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(result.getReason());
+                if (result.isError()) {
+                    log.warn("Webhook Banchile error procesando reserva {}: {}", resId, result.getReason());
+                    return ResponseEntity.ok("processing error: " + result.getReason());
                 }
-                return ResponseEntity.ok(result.getReason());
+                return ResponseEntity.ok(result.isSuccessful() ? "OK" : result.getReason());
             })
             .orElseGet(() -> {
                 log.warn("Webhook Banchile para reservation desconocida: {}", resId);
-                return ResponseEntity.badRequest().body("NOK");
+                return ResponseEntity.ok("reservation not found ignored");
             });
     }
 
