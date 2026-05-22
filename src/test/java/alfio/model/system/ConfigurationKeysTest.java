@@ -30,7 +30,6 @@ class ConfigurationKeysTest {
         "BANCHILE_ENABLED",
         "BANCHILE_LOGIN",
         "BANCHILE_TRANKEY",
-        "BANCHILE_WEBHOOK_SECRET",
         "BANCHILE_BASE_URL"
     );
 
@@ -54,14 +53,11 @@ class ConfigurationKeysTest {
 
     @Test
     void banchileSecretKeysUseTextComponentType() {
-        // BANCHILE_TRANKEY and BANCHILE_WEBHOOK_SECRET must use TEXT component type
+        // BANCHILE_TRANKEY must use TEXT component type
         // (same pattern as MOLLIE_API_KEY, STRIPE_SECRET_KEY — no PASSWORD type exists)
         var tranKey = ConfigurationKeys.safeValueOf("BANCHILE_TRANKEY");
-        var webhookSecret = ConfigurationKeys.safeValueOf("BANCHILE_WEBHOOK_SECRET");
         assertEquals(ComponentType.TEXT, tranKey.getComponentType(),
             "BANCHILE_TRANKEY should use ComponentType.TEXT");
-        assertEquals(ComponentType.TEXT, webhookSecret.getComponentType(),
-            "BANCHILE_WEBHOOK_SECRET should use ComponentType.TEXT");
     }
 
     @Test

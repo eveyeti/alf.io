@@ -287,10 +287,9 @@ public enum ConfigurationKeys {
 
     // Banchile Pagos Web Checkout
     BANCHILE_ENABLED("Banchile Pagos enabled (default false)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.BOOLEAN, false, EnumSet.of(SYSTEM, ORGANIZATION, PURCHASE_CONTEXT), BooleanUtils.FALSE),
-    BANCHILE_LOGIN("Banchile public login ID (32-char hex)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
-    BANCHILE_TRANKEY("Banchile secret tranKey used for SHA1 signature", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
-    BANCHILE_WEBHOOK_SECRET("Banchile webhook signing secret for inbound webhook validation", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM)),
-    BANCHILE_BASE_URL("Banchile API base URL (sandbox: https://checkout.test.banchilepagos.cl, prod: https://api.banchilepagos.cl)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM))
+    BANCHILE_LOGIN("Banchile public login ID (32-char hex provisto por Banchile)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
+    BANCHILE_TRANKEY("Banchile secret key (provisto por Banchile, también usado para firmar webhooks vía SHA-256)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
+    BANCHILE_BASE_URL("Banchile API base URL (sandbox: https://checkout.test.banchilepagos.cl, prod: https://checkout.banchilepagos.cl)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM))
     ;
 
     @Getter

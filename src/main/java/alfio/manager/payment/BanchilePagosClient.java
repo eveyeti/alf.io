@@ -45,11 +45,12 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 /**
  * Cliente HTTP para la API de Banchile Pagos (PlacetoPay gateway).
  *
- * <p>Implementa el esquema de autenticación PlacetoPay:
+ * <p>Implementa el esquema de autenticación Banchile Pagos WebCheckout:
  * <pre>
- *   tranKey_sig = Base64( SHA1( nonce_bytes ‖ seed.getBytes(UTF8) ‖ tranKey.getBytes(UTF8) ) )
+ *   tranKey_sig = Base64( SHA-256( nonce_bytes ‖ seed.getBytes(UTF8) ‖ secretKey.getBytes(UTF8) ) )
  *   nonce_b64   = Base64( nonce_bytes )
  * </pre>
+ * Referencia: https://developers.banchilepagos.cl/documentacion#web-checkout#configuracion-autenticacion
  *
  * <p>Endpoints soportados:
  * <ul>
@@ -83,43 +84,40 @@ public class BanchilePagosClient {
      * recibe {@code nonceBytes} y {@code seed} explícitamente.
      *
      * @param login      Identificador del comercio
-     * @param tranKey    Secret tranKey del comercio (en texto plano)
+     * @param secretKey  Secret key del comercio (texto plano, lo provee Banchile)
      * @param nonceBytes 16 bytes aleatorios para el nonce
-     * @param seed       Timestamp ISO-8601 UTC, p.ej. "2026-05-18T00:00:00Z"
+     * @param seed       Timestamp ISO-8601 con offset, p.ej. "2026-05-18T00:00:00-05:00"
      * @return Auth con tranKey firmado y nonce en Base64
      */
-    public static Auth buildAuth(String login, String tranKey, byte[] nonceBytes, String seed) {
+    public static Auth buildAuth(String login, String secretKey, byte[] nonceBytes, String seed) {
         try {
-            // SHA-1 es requerido por el protocolo PlacetoPay (Banchile Pagos auth scheme).
-            // No es una elección nuestra — el servidor rechaza cualquier otro algoritmo.
-            MessageDigest sha1 = MessageDigest.getInstance("SHA-1"); // nosemgrep: java.lang.security.audit.crypto.use-of-sha1.use-of-sha1
-            sha1.update(nonceBytes);
-            sha1.update(seed.getBytes(UTF_8));
-            sha1.update(tranKey.getBytes(UTF_8));
-            byte[] digest = sha1.digest();
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            sha256.update(nonceBytes);
+            sha256.update(seed.getBytes(UTF_8));
+            sha256.update(secretKey.getBytes(UTF_8));
+            byte[] digest = sha256.digest();
 
             String tranKeySigned = Base64.getEncoder().encodeToString(digest);
             String nonceb64 = Base64.getEncoder().encodeToString(nonceBytes);
 
             return new Auth(login, tranKeySigned, nonceb64, seed);
         } catch (NoSuchAlgorithmException e) {
-            // SHA-1 está garantizado en todo JDK — esto no ocurrirá en producción
-            throw new IllegalStateException("SHA-1 no disponible en este JDK", e);
+            throw new IllegalStateException("SHA-256 no disponible en este JDK", e);
         }
     }
 
     /**
      * Genera el objeto {@link Auth} con nonce aleatorio y seed en el instante actual (UTC).
      *
-     * @param login    Identificador del comercio
-     * @param tranKey  Secret tranKey del comercio (en texto plano)
+     * @param login     Identificador del comercio
+     * @param secretKey Secret key del comercio (texto plano)
      * @return Auth con tranKey firmado y nonce en Base64
      */
-    public static Auth buildAuth(String login, String tranKey) {
+    public static Auth buildAuth(String login, String secretKey) {
         byte[] nonceBytes = new byte[NONCE_BYTES];
         new SecureRandom().nextBytes(nonceBytes);
-        String seed = Instant.now().toString(); // ISO-8601 UTC con sufijo "Z"
-        return buildAuth(login, tranKey, nonceBytes, seed);
+        String seed = Instant.now().toString();
+        return buildAuth(login, secretKey, nonceBytes, seed);
     }
 
     // -------------------------------------------------------------------------

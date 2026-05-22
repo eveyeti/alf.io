@@ -50,9 +50,9 @@ class BanchilePagosClientTest {
 
     private BanchilePagosClient client;
 
-    // Sandbox creds públicos (de la documentación de Banchile/PlacetoPay)
-    private static final String LOGIN    = "ffb78b93826239e1aa85a515aa961bd9";
-    private static final String TRAN_KEY = "U87nG0kcCsjb61Mj";
+    // Sandbox creds públicos (de la documentación de Banchile)
+    private static final String LOGIN      = "ffb78b93826239e1aa85a515aa961bd9";
+    private static final String SECRET_KEY = "U87nG0kcCsjb61Mj";
 
     @BeforeAll
     static void startMockServer() {
@@ -76,16 +76,16 @@ class BanchilePagosClientTest {
     // -------------------------------------------------------------------------
 
     /**
-     * Verifica que buildAuth produce la firma SHA-1 correcta para un vector conocido.
+     * Verifica que buildAuth produce la firma SHA-256 correcta para un vector conocido.
      *
      * <p>Valor esperado calculado con:
      * <pre>
      *   python3 -c "import base64,hashlib;
-     *     print(base64.b64encode(hashlib.sha1(
+     *     print(base64.b64encode(hashlib.sha256(
      *       bytes(range(16))
      *       + b'2026-05-18T00:00:00Z'
      *       + b'U87nG0kcCsjb61Mj').digest()).decode())"
-     *   → al9lqLDZ1eZWOLEdBKhASz9d5zE=
+     *   → TOysTaGBOlUPZQUIur4majinrTPdAIS/yIiJNcbLXY4=
      * </pre>
      */
     @Test
@@ -96,10 +96,10 @@ class BanchilePagosClientTest {
         }
         String seed = "2026-05-18T00:00:00Z";
 
-        Auth auth = BanchilePagosClient.buildAuth(LOGIN, TRAN_KEY, nonce, seed);
+        Auth auth = BanchilePagosClient.buildAuth(LOGIN, SECRET_KEY, nonce, seed);
 
-        assertEquals("al9lqLDZ1eZWOLEdBKhASz9d5zE=", auth.tranKey(),
-            "tranKey firmado debe coincidir con SHA1(nonce||seed||tranKey) en Base64");
+        assertEquals("TOysTaGBOlUPZQUIur4majinrTPdAIS/yIiJNcbLXY4=", auth.tranKey(),
+            "tranKey firmado debe coincidir con Base64(SHA-256(nonce||seed||secretKey))");
         assertEquals("AAECAwQFBgcICQoLDA0ODw==", auth.nonce(),
             "nonce debe ser Base64 de bytes [0..15]");
         assertEquals(seed, auth.seed());
@@ -136,13 +136,15 @@ class BanchilePagosClientTest {
                         """)
             );
 
-        Auth auth = BanchilePagosClient.buildAuth(LOGIN, TRAN_KEY);
+        Auth auth = BanchilePagosClient.buildAuth(LOGIN, SECRET_KEY);
         CreateSessionRequest req = new CreateSessionRequest(
             auth,
             "es_CL",
             new Buyer("Test", "Smoke", "smoke@viaggio2027-dev.local", "11111111-1", "CLRUT", "+56900000000"),
             new Payment("REF-001", "Entrada evento test", new Amount("CLP", 10000L)),
             "https://example.com/return",
+            "https://example.com/cancel",
+            "https://example.com/webhook",
             "127.0.0.1",
             "BanchileTestClient/1.0",
             "2026-05-18T02:00:00Z"
@@ -186,13 +188,15 @@ class BanchilePagosClientTest {
                         """)
             );
 
-        Auth auth = BanchilePagosClient.buildAuth(LOGIN, TRAN_KEY);
+        Auth auth = BanchilePagosClient.buildAuth(LOGIN, SECRET_KEY);
         CreateSessionRequest req = new CreateSessionRequest(
             auth,
             "es_CL",
             new Buyer("Test", "Smoke", "smoke@viaggio2027-dev.local", null, null, null),
             new Payment("REF-002", "ab", new Amount("CLP", 5000L)), // description < 4 chars
             "https://example.com/return",
+            "https://example.com/cancel",
+            "https://example.com/webhook",
             "127.0.0.1",
             "BanchileTestClient/1.0",
             "2026-05-18T02:00:00Z"
@@ -255,7 +259,7 @@ class BanchilePagosClientTest {
                         """)
             );
 
-        Auth auth = BanchilePagosClient.buildAuth(LOGIN, TRAN_KEY);
+        Auth auth = BanchilePagosClient.buildAuth(LOGIN, SECRET_KEY);
         String baseUrl = "http://localhost:" + mockPort;
 
         SessionResponse response = client.querySession(requestId, auth, baseUrl);
