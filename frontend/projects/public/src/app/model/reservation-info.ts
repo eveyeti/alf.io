@@ -44,6 +44,18 @@ export class ReservationInfo {
     subscriptionInfos?: Array<ReservationSubscriptionInfo>;
     metadata: ReservationMetadata;
     additionalServiceWithData?: Array<AdditionalServiceWithData>;
+    paymentDetails?: PaymentDetailsInfo;
+}
+
+export interface PaymentDetailsInfo {
+  authorization?: string;     // banchile_authorization (CUS)
+  paymentMethodName?: string; // ej. "Visa Credito"
+  issuer?: string;            // banco emisor
+  lastDigits?: string;        // 4 últimos dígitos
+  franchise?: string;         // ej. "VISA"
+  receipt?: string;           // n° voucher
+  statusReason?: string;      // código de rechazo (ej. "05")
+  statusMessage?: string;     // texto del motivo
 }
 
 export interface AdditionalServiceWithData {

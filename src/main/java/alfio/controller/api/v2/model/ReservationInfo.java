@@ -86,6 +86,55 @@ public class ReservationInfo {
 
     private final List<AdditionalServiceWithData> additionalServiceWithData;
 
+    /**
+     * Detalles del pago externo (Banchile Pagos) extraídos de {@code b_transaction.metadata}.
+     * Null cuando no hay transacción Banchile asociada a la reserva.
+     *
+     * <p>Cumple los items 3 y 4 de mejores prácticas de la certificación Banchile:
+     * mostrar al usuario el código de autorización (CUS) y, en rechazos, el motivo.
+     */
+    private final PaymentDetailsInfo paymentDetails;
+
+
+    @AllArgsConstructor
+    @Getter
+    public static class PaymentDetailsInfo {
+        private final String authorization;     // banchile_authorization (CUS)
+        private final String paymentMethodName; // banchile_payment_method_name (ej. "Visa Credito")
+        private final String issuer;            // banchile_issuer (banco emisor)
+        private final String lastDigits;        // banchile_pf_lastDigits (4 últimos dígitos)
+        private final String franchise;         // banchile_franchise (ej. "VISA")
+        private final String receipt;           // banchile_receipt (n° voucher)
+        private final String statusReason;      // banchile_status_reason (código rechazo)
+        private final String statusMessage;     // banchile_status_message (texto motivo)
+
+        /**
+         * Construye un PaymentDetailsInfo a partir de los campos {@code banchile_*}
+         * persistidos en {@code b_transaction.metadata}. Devuelve {@code null} si la
+         * metadata no contiene información Banchile (e.g. otra pasarela o reserva
+         * gratuita).
+         */
+        public static PaymentDetailsInfo fromMetadata(java.util.Map<String, String> metadata) {
+            if (metadata == null || metadata.isEmpty()) {
+                return null;
+            }
+            boolean hasBanchile = metadata.keySet().stream().anyMatch(k -> k.startsWith("banchile_"));
+            if (!hasBanchile) {
+                return null;
+            }
+            return new PaymentDetailsInfo(
+                metadata.get("banchile_authorization"),
+                metadata.get("banchile_payment_method_name"),
+                metadata.get("banchile_issuer"),
+                metadata.get("banchile_pf_lastDigits"),
+                metadata.get("banchile_franchise"),
+                metadata.get("banchile_receipt"),
+                metadata.get("banchile_status_reason"),
+                metadata.get("banchile_status_message")
+            );
+        }
+    }
+
 
     @AllArgsConstructor
     @Getter

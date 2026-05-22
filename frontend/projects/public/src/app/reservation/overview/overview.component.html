@@ -2,6 +2,16 @@
 
 <div *ngIf="reservationInfo && purchaseContext">
 
+  <div *ngIf="reservationInfo.paymentDetails?.statusMessage && !reservationInfo.paymentDetails?.authorization"
+       class="alert alert-warning d-flex align-items-start mb-4" role="alert">
+    <fa-icon [icon]="['fas', 'triangle-exclamation']" class="me-2 mt-1" a11yRole="presentation"></fa-icon>
+    <div>
+      <strong>Tu intento de pago anterior fue rechazado.</strong>
+      <div class="mt-1">Motivo: {{reservationInfo.paymentDetails?.statusMessage}}<span *ngIf="reservationInfo.paymentDetails?.statusReason"> (código {{reservationInfo.paymentDetails?.statusReason}})</span>.</div>
+      <div class="mt-1">Podés intentar nuevamente con otra tarjeta.</div>
+    </div>
+  </div>
+
   <app-stepper [currentStep]="3" [free]="reservationInfo.orderSummary.free"></app-stepper>
 
   <app-countdown *ngIf="!expired" [validity]="reservationInfo.validity" (expired)="handleExpired($event)"></app-countdown>

@@ -217,6 +217,11 @@ public class ReservationApiV2Controller {
                     .collect(Collectors.toList());
             }
 
+            // Detalles del pago externo (Banchile): leer metadata de la última transacción.
+            var paymentDetails = transactionRepository.loadOptionalByReservationId(reservationId)
+                .map(tx -> ReservationInfo.PaymentDetailsInfo.fromMetadata(tx.getMetadata()))
+                .orElse(null);
+
             return Optional.of(new ReservationInfo(reservation.getId(), shortReservationId,
                 reservation.getFirstName(), reservation.getLastName(), reservation.getEmail(),
                 reservation.getValidity().getTime(),
@@ -241,7 +246,8 @@ public class ReservationApiV2Controller {
                 getActivePaymentMethods(purchaseContext, requireNonNullElse(categoryIds, Set.of()), orderSummary, reservationId),
                 subscriptionInfos,
                 ticketReservationRepository.getMetadata(reservationId),
-                requireNonNullElse(additionalServices, List.of())
+                requireNonNullElse(additionalServices, List.of()),
+                paymentDetails
                 ));
         }));
 

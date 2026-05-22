@@ -7,6 +7,31 @@
 
 
 <div *ngIf="reservationInfo && event">
+  <div *ngIf="reservationInfo.paymentDetails?.authorization" class="card mb-4 border-success">
+    <div class="card-body">
+      <h4 class="card-title mb-3"><fa-icon [icon]="['fas', 'credit-card']" a11yRole="presentation"></fa-icon> Comprobante de pago</h4>
+      <dl class="row mb-0">
+        <dt class="col-sm-5 col-md-4">Código de autorización</dt>
+        <dd class="col-sm-7 col-md-8"><strong>{{reservationInfo.paymentDetails?.authorization}}</strong></dd>
+
+        <ng-container *ngIf="reservationInfo.paymentDetails?.paymentMethodName">
+          <dt class="col-sm-5 col-md-4">Medio de pago</dt>
+          <dd class="col-sm-7 col-md-8">{{reservationInfo.paymentDetails?.paymentMethodName}}<span *ngIf="reservationInfo.paymentDetails?.lastDigits"> ····{{reservationInfo.paymentDetails?.lastDigits}}</span></dd>
+        </ng-container>
+
+        <ng-container *ngIf="reservationInfo.paymentDetails?.issuer">
+          <dt class="col-sm-5 col-md-4">Banco emisor</dt>
+          <dd class="col-sm-7 col-md-8">{{reservationInfo.paymentDetails?.issuer}}</dd>
+        </ng-container>
+
+        <ng-container *ngIf="reservationInfo.paymentDetails?.receipt">
+          <dt class="col-sm-5 col-md-4">N° voucher</dt>
+          <dd class="col-sm-7 col-md-8">{{reservationInfo.paymentDetails?.receipt}}</dd>
+        </ng-container>
+      </dl>
+    </div>
+  </div>
+
   <div class="alert alert-success mb-5">
       <div class="row">
           <div class="col-sm-12">
