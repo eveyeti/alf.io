@@ -114,6 +114,7 @@ public class ReservationApiV2Controller {
     private final AdditionalServiceManager additionalServiceManager;
     private final AdditionalServiceHelper additionalServiceHelper;
     private final PurchaseContextFieldManager purchaseContextFieldManager;
+    private final TransactionRepository transactionRepository;
 
     /**
      * Note: now it will return for any states of the reservation.
@@ -266,6 +267,24 @@ public class ReservationApiV2Controller {
 
     @GetMapping("/reservation/{reservationId}/status")
     public ResponseEntity<ReservationStatusInfo> getReservationStatus(@PathVariable String reservationId) {
+
+        // Banchile WebCheckout no acepta notificationUrl por sesión: aprovechamos el polling
+        // del frontend (cada 2s) para forzar un querySession a Banchile y reconciliar el
+        // estado en milisegundos, sin esperar al scheduler global.
+        // Filter por transacción Banchile PENDING (no por reservation.payment_method, que
+        // queda NULL hasta que la reserva se confirma).
+        transactionRepository.loadOptionalByReservationIdAndStatus(reservationId, Transaction.Status.PENDING)
+            .filter(tx -> tx.getPaymentProxy() == PaymentProxy.BANCHILE)
+            .flatMap(tx -> ticketReservationManager.findById(reservationId)
+                .flatMap(r -> purchaseContextManager.findByReservationId(reservationId)
+                    .map(pc -> Pair.of(pc, r))))
+            .ifPresent(pair -> {
+                log.info("[banchile-poll] dispatching forceTransactionCheck for reservation={} status={}",
+                    reservationId, pair.getRight().getStatus());
+                var result = ticketReservationManager.forceTransactionCheck(pair.getLeft(), pair.getRight());
+                log.info("[banchile-poll] forceTransactionCheck result={}",
+                    result.map(Object::toString).orElse("empty"));
+            });
 
         Optional<ReservationStatusInfo> res = ticketReservationRepository.findOptionalStatusAndValidationById(reservationId)
             .map(status -> new ReservationStatusInfo(status.getStatus(), Boolean.TRUE.equals(status.getValidated())));

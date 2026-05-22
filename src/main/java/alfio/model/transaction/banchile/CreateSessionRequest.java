@@ -19,14 +19,18 @@ package alfio.model.transaction.banchile;
 /**
  * DTO para el body de POST /api/session de Banchile Pagos.
  *
- * @param auth       Credenciales firmadas (PlacetoPay auth scheme)
- * @param locale     Locale del checkout, p.ej. "es_CL"
- * @param buyer      Datos opcionales del comprador
- * @param payment    Datos del pago (referencia, descripción, monto)
- * @param returnUrl  URL de retorno tras el pago
- * @param ipAddress  IP del comprador
- * @param userAgent  User-Agent del comprador
- * @param expiration Vencimiento de la sesión en ISO-8601, p.ej. "2026-05-18T12:00:00Z"
+ * @param auth            Credenciales firmadas (Banchile auth scheme)
+ * @param locale          Locale del checkout, p.ej. "es_CL"
+ * @param buyer           Datos opcionales del comprador
+ * @param payment         Datos del pago (referencia, descripción, monto)
+ * @param returnUrl       URL de retorno tras el pago (browser redirect)
+ * @param cancelUrl       URL a la que vuelve el usuario si cancela en pantalla Banchile
+ * @param notificationUrl URL del webhook server-to-server. Banchile envía POST con el resultado
+ *                        cuando la sesión llega a estado final. Documentado en
+ *                        Transacción Completa / Notificaciones — aplica también a WebCheckout.
+ * @param ipAddress       IP del comprador
+ * @param userAgent       User-Agent del comprador
+ * @param expiration      Vencimiento de la sesión en ISO-8601, p.ej. "2026-05-18T12:00:00Z"
  */
 public record CreateSessionRequest(
     Auth auth,
@@ -34,6 +38,8 @@ public record CreateSessionRequest(
     Buyer buyer,
     Payment payment,
     String returnUrl,
+    String cancelUrl,
+    String notificationUrl,
     String ipAddress,
     String userAgent,
     String expiration

@@ -68,17 +68,62 @@ public record SessionResponse(
     public record Status(String status, String reason, String message, String date) {}
 
     /**
-     * Detalles del pago (presente en respuestas con status APPROVED).
+     * Detalles del pago (presente en respuestas con status APPROVED y también en algunos rechazos).
      *
-     * @param reference Referencia interna del comercio
-     * @param amount    Monto aprobado
-     * @param receipt   Número de recibo / voucher
-     * @param status    Estado del pago
+     * <p>Banchile devuelve mucho más que reference/amount/receipt/status. Todos los campos
+     * opcionales — cada uno puede venir {@code null} dependiendo del medio de pago, banco
+     * emisor y estado del intento.
+     *
+     * @param reference         Referencia interna del comercio
+     * @param amount            Monto aprobado
+     * @param receipt           Número de recibo / voucher
+     * @param status            Estado del pago
+     * @param internalReference ID interno de Banchile usado para reembolsos (`/api/reverse`)
+     * @param paymentMethod     Código del medio de pago (e.g., "VS", "MC", "DC")
+     * @param paymentMethodName Nombre legible del medio de pago (e.g., "Visa Credito")
+     * @param issuerName        Banco emisor de la tarjeta
+     * @param authorization     Código CUS / código de autorización del banco
+     * @param franchise         Franquicia de la marca (e.g., "VISA", "AMEX")
+     * @param refunded          true si el intento fue revertido posteriormente
+     * @param processorFields   Campos adicionales del procesador (lastDigits, BIN, etc.) — list of {keyword, value, displayOn}
      */
     public record PaymentDetails(
         String reference,
         CreateSessionRequest.Amount amount,
         String receipt,
-        Status status
-    ) {}
+        Status status,
+        Integer internalReference,
+        String paymentMethod,
+        String paymentMethodName,
+        String issuerName,
+        String authorization,
+        String franchise,
+        Boolean refunded,
+        java.util.List<ProcessorField> processorFields
+    ) {
+        /**
+         * Constructor de compatibilidad para tests existentes (4 campos).
+         * Todos los campos extendidos quedan null.
+         */
+        public PaymentDetails(String reference,
+                              CreateSessionRequest.Amount amount,
+                              String receipt,
+                              Status status) {
+            this(reference, amount, receipt, status,
+                null, null, null, null, null, null, null, null);
+        }
+    }
+
+    /**
+     * Item del array {@code processorFields[]} dentro de un {@link PaymentDetails}.
+     *
+     * <p>Banchile incluye aquí metadata operacional (lastDigits, bin, merchantCode, etc.).
+     * El campo {@code value} puede ser string u objeto/array según el caso —
+     * deserializado como {@link Object} para tolerar variabilidad.
+     *
+     * @param keyword   Identificador del campo (e.g., "lastDigits", "bin")
+     * @param value     Valor (string o estructura)
+     * @param displayOn Donde mostrarlo (e.g., "receipt", "approval")
+     */
+    public record ProcessorField(String keyword, Object value, String displayOn) {}
 }

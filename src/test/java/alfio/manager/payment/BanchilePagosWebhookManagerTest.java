@@ -42,8 +42,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.security.MessageDigest;
 import java.time.ZoneId;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+
+import org.mockito.ArgumentCaptor;
 
 import static alfio.model.system.ConfigurationKeys.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -64,8 +67,7 @@ class BanchilePagosWebhookManagerTest {
     private static final int    TRANSACTION_ID    = 42;
     private static final String BASE_URL          = "https://checkout.test.banchilepagos.cl";
     private static final String LOGIN             = "ffb78b93826239e1aa85a515aa961bd9";
-    private static final String TRAN_KEY          = "U87nG0kcCsjb61Mj";
-    private static final String WEBHOOK_SECRET    = "webhook-secret-for-tests";
+    private static final String SECRET_KEY        = "U87nG0kcCsjb61Mj";
     private static final String PROCESS_URL       = "https://checkout.test.banchilepagos.cl/spa/session/999";
 
     // --- Mocks ---
@@ -234,7 +236,7 @@ class BanchilePagosWebhookManagerTest {
         // Arrange: calcular la firma correcta para el payload
         String statusStr  = "APPROVED";
         String dateStr    = "2026-05-18T10:00:00-04:00";
-        String signature  = computeExpectedSignature(REQUEST_ID_INT, statusStr, dateStr, WEBHOOK_SECRET);
+        String signature  = "sha256:" + computeExpectedSignature(REQUEST_ID_INT, statusStr, dateStr, SECRET_KEY);
 
         var webhookPayload = new BanchileWebhookPayload(
             REQUEST_ID_INT,
@@ -246,10 +248,29 @@ class BanchilePagosWebhookManagerTest {
             webhookPayload, RESERVATION_ID
         );
 
-        // querySession devuelve APPROVED desde el servidor remoto
+        // querySession devuelve APPROVED con TODOS los campos extendidos para verificar trazabilidad
+        var processorFields = List.of(
+            new SessionResponse.ProcessorField("lastDigits", "1111", "receipt"),
+            new SessionResponse.ProcessorField("bin", "411111", "receipt"),
+            new SessionResponse.ProcessorField("merchantCode", "123456", "approval")
+        );
+        var paymentDetails = new SessionResponse.PaymentDetails(
+            RESERVATION_ID,
+            new alfio.model.transaction.banchile.CreateSessionRequest.Amount("CLP", 10000L),
+            "REC-001",
+            new SessionResponse.Status("APPROVED", "00", "Aprobado", dateStr),
+            12345678,                  // internalReference
+            "VS",                      // paymentMethod
+            "Visa Credito",            // paymentMethodName
+            "Banco de Chile",          // issuerName
+            "685559",                  // authorization (código CUS)
+            "VISA",                    // franchise
+            false,                     // refunded
+            processorFields
+        );
         var remoteSession = new SessionResponse(
             new SessionResponse.Status("APPROVED", "00", "Aprobado", dateStr),
-            REQUEST_ID_INT, null, null
+            REQUEST_ID_INT, null, List.of(paymentDetails)
         );
         when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL)))
             .thenReturn(remoteSession);
@@ -260,10 +281,6 @@ class BanchilePagosWebhookManagerTest {
         when(ticketReservationRepository.findOptionalStatusAndValidationById(RESERVATION_ID))
             .thenReturn(Optional.of(reservationStatus));
 
-        // BANCHILE_WEBHOOK_SECRET configurado
-        when(configurationManager.getForSystem(BANCHILE_WEBHOOK_SECRET))
-            .thenReturn(MaybeConfigurationBuilder.existing(BANCHILE_WEBHOOK_SECRET, WEBHOOK_SECRET));
-
         // Act
         PaymentWebhookResult result = manager.processWebhook(transactionWebhookPayload, transaction, paymentContext);
 
@@ -272,14 +289,105 @@ class BanchilePagosWebhookManagerTest {
             "Webhook APPROVED con firma válida debe ser SUCCESSFUL");
         assertNotNull(result.getPaymentToken(), "PaymentToken no debe ser null en SUCCESSFUL");
 
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> metadataCaptor = ArgumentCaptor.forClass(Map.class);
         verify(transactionRepository).update(
             eq(TRANSACTION_ID),
             eq(REQUEST_ID_STR), eq(REQUEST_ID_STR),
             any(),              // timestamp
             eq(0L), eq(0L),
             eq(Transaction.Status.COMPLETE),
-            any()
+            metadataCaptor.capture()
         );
+
+        Map<String, String> metadata = metadataCaptor.getValue();
+        assertEquals(REQUEST_ID_STR, metadata.get("banchile_request_id"));
+        assertEquals(RESERVATION_ID, metadata.get("banchile_reference"));
+        assertEquals("APPROVED", metadata.get("banchile_status"));
+        assertEquals(dateStr, metadata.get("banchile_status_date"));
+        assertEquals("00", metadata.get("banchile_status_reason"));
+        assertEquals("Aprobado", metadata.get("banchile_status_message"));
+        assertEquals("12345678", metadata.get("banchile_internal_reference"));
+        assertEquals("685559", metadata.get("banchile_authorization"));
+        assertEquals("VS", metadata.get("banchile_payment_method"));
+        assertEquals("Visa Credito", metadata.get("banchile_payment_method_name"));
+        assertEquals("Banco de Chile", metadata.get("banchile_issuer"));
+        assertEquals("VISA", metadata.get("banchile_franchise"));
+        assertEquals("REC-001", metadata.get("banchile_receipt"));
+        assertEquals("1111", metadata.get("banchile_pf_lastDigits"));
+        assertEquals("411111", metadata.get("banchile_pf_bin"));
+        assertEquals("123456", metadata.get("banchile_pf_merchantCode"));
+        assertNull(metadata.get("banchile_refunded"), "refunded=false no debe persistirse");
+    }
+
+    // =========================================================================
+    // T4b — processWebhook FAILED persiste metadata de rechazo
+    // =========================================================================
+
+    @Test
+    void processWebhookRejectedPersistsRejectionMetadata() throws Exception {
+        String statusStr = "REJECTED";
+        String dateStr   = "2026-05-18T10:05:00-04:00";
+        String signature = "sha256:" + computeExpectedSignature(REQUEST_ID_INT, statusStr, dateStr, SECRET_KEY);
+
+        var webhookPayload = new BanchileWebhookPayload(
+            REQUEST_ID_INT,
+            RESERVATION_ID,
+            new SessionResponse.Status(statusStr, "05", "Do not honor", dateStr),
+            signature
+        );
+        var transactionWebhookPayload = new BanchilePagosWebhookManager.BanchileTransactionWebhookPayload(
+            webhookPayload, RESERVATION_ID
+        );
+
+        // querySession devuelve REJECTED. Algunos rechazos vienen con un payment[] (no APPROVED).
+        var rejectedPaymentDetails = new SessionResponse.PaymentDetails(
+            RESERVATION_ID,
+            new alfio.model.transaction.banchile.CreateSessionRequest.Amount("CLP", 10000L),
+            null,
+            new SessionResponse.Status("REJECTED", "05", "Do not honor", dateStr),
+            null,                      // sin internalReference en rechazo
+            "VS",
+            "Visa Credito",
+            "Banco Estado",
+            null,                      // sin authorization (rechazo)
+            "VISA",
+            null,
+            List.of(new SessionResponse.ProcessorField("lastDigits", "0016", "receipt"))
+        );
+        var remoteSession = new SessionResponse(
+            new SessionResponse.Status("REJECTED", "05", "Do not honor", dateStr),
+            REQUEST_ID_INT, null, List.of(rejectedPaymentDetails)
+        );
+        when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL)))
+            .thenReturn(remoteSession);
+
+        PaymentWebhookResult result = manager.processWebhook(transactionWebhookPayload, transaction, paymentContext);
+
+        assertEquals(PaymentWebhookResult.Type.FAILED, result.getType(),
+            "Webhook REJECTED debe ser FAILED");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> metadataCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(transactionRepository).update(
+            eq(TRANSACTION_ID),
+            eq(REQUEST_ID_STR), eq(REQUEST_ID_STR),
+            any(),
+            eq(0L), eq(0L),
+            eq(Transaction.Status.FAILED),
+            metadataCaptor.capture()
+        );
+
+        Map<String, String> metadata = metadataCaptor.getValue();
+        assertEquals("REJECTED", metadata.get("banchile_status"));
+        assertEquals("05", metadata.get("banchile_status_reason"));
+        assertEquals("Do not honor", metadata.get("banchile_status_message"));
+        assertEquals("VS", metadata.get("banchile_payment_method"));
+        assertEquals("Banco Estado", metadata.get("banchile_issuer"));
+        assertEquals("0016", metadata.get("banchile_pf_lastDigits"));
+        // En rechazos no hay authorization ni internalReference
+        assertNull(metadata.get("banchile_authorization"));
+        assertNull(metadata.get("banchile_internal_reference"));
     }
 
     // =========================================================================
@@ -298,9 +406,6 @@ class BanchilePagosWebhookManagerTest {
         var transactionWebhookPayload = new BanchilePagosWebhookManager.BanchileTransactionWebhookPayload(
             webhookPayload, RESERVATION_ID
         );
-
-        when(configurationManager.getForSystem(BANCHILE_WEBHOOK_SECRET))
-            .thenReturn(MaybeConfigurationBuilder.existing(BANCHILE_WEBHOOK_SECRET, WEBHOOK_SECRET));
 
         // Act
         PaymentWebhookResult result = manager.processWebhook(transactionWebhookPayload, transaction, paymentContext);
@@ -332,9 +437,6 @@ class BanchilePagosWebhookManagerTest {
         var transactionWebhookPayload = new BanchilePagosWebhookManager.BanchileTransactionWebhookPayload(
             webhookPayload, RESERVATION_ID
         );
-
-        when(configurationManager.getForSystem(BANCHILE_WEBHOOK_SECRET))
-            .thenReturn(MaybeConfigurationBuilder.missing(BANCHILE_WEBHOOK_SECRET));
 
         // Act
         PaymentWebhookResult result = manager.processWebhook(transactionWebhookPayload, transaction, paymentContext);
@@ -401,20 +503,22 @@ class BanchilePagosWebhookManagerTest {
     // =========================================================================
 
     /**
-     * Calcula la firma esperada del webhook según la fórmula del spec:
-     * {@code Base64(SHA1(requestId + status + date + secret))}
-     *
-     * <p><b>TODO:</b> confirmar esta fórmula contra el primer webhook real capturado
-     * en Phase F del plan de integración.
+     * Calcula la firma esperada del webhook según la doc oficial de Banchile:
+     * {@code SHA-256(requestId + status.status + status.date + secretKey)} en hex lowercase.
+     * <p>La doc también acepta Base64; aquí usamos hex porque el ejemplo del portal de
+     * Banchile muestra el digest como `sha256:<hex>`.
      */
     private static String computeExpectedSignature(int requestId, String status, String date, String secret)
         throws Exception {
         String input = requestId + status + date + secret;
-        // SHA-1 requerido por el protocolo Banchile
-        // nosemgrep: java.lang.security.audit.crypto.use-of-sha1.use-of-sha1
-        MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
-        byte[] digest = sha1.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        return Base64.getEncoder().encodeToString(digest);
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        byte[] digest = sha256.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        StringBuilder hex = new StringBuilder(digest.length * 2);
+        for (byte b : digest) {
+            hex.append(Character.forDigit((b >> 4) & 0xF, 16));
+            hex.append(Character.forDigit(b & 0xF, 16));
+        }
+        return hex.toString();
     }
 
     /**
@@ -425,11 +529,10 @@ class BanchilePagosWebhookManagerTest {
      */
     private void stubConfiguration(boolean enabled) {
         var configMap = Map.of(
-            BANCHILE_ENABLED,        MaybeConfigurationBuilder.existing(BANCHILE_ENABLED, enabled ? "true" : "false"),
-            BANCHILE_LOGIN,          MaybeConfigurationBuilder.existing(BANCHILE_LOGIN, LOGIN),
-            BANCHILE_TRANKEY,        MaybeConfigurationBuilder.existing(BANCHILE_TRANKEY, TRAN_KEY),
-            BANCHILE_WEBHOOK_SECRET, MaybeConfigurationBuilder.existing(BANCHILE_WEBHOOK_SECRET, WEBHOOK_SECRET),
-            BANCHILE_BASE_URL,       MaybeConfigurationBuilder.existing(BANCHILE_BASE_URL, BASE_URL)
+            BANCHILE_ENABLED,  MaybeConfigurationBuilder.existing(BANCHILE_ENABLED, enabled ? "true" : "false"),
+            BANCHILE_LOGIN,    MaybeConfigurationBuilder.existing(BANCHILE_LOGIN, LOGIN),
+            BANCHILE_TRANKEY,  MaybeConfigurationBuilder.existing(BANCHILE_TRANKEY, SECRET_KEY),
+            BANCHILE_BASE_URL, MaybeConfigurationBuilder.existing(BANCHILE_BASE_URL, BASE_URL)
         );
         when(configurationManager.getFor(eq(BanchilePagosWebhookManager.ALL_OPTIONS), any()))
             .thenReturn(configMap);

@@ -87,7 +87,6 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
         BANCHILE_ENABLED,
         BANCHILE_LOGIN,
         BANCHILE_TRANKEY,
-        BANCHILE_WEBHOOK_SECRET,
         BANCHILE_BASE_URL
     );
 
@@ -182,9 +181,16 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
             // URL de retorno: la misma "book" que usa Mollie como patrón
             String alfioBaseUrl = configurationManager.getFor(BASE_URL, purchaseContext.getConfigurationLevel()).getRequiredValue();
-            String returnUrl = alfioBaseUrl + "/" + purchaseContext.getType().getUrlComponent()
+            String reservationBaseUrl = alfioBaseUrl + "/" + purchaseContext.getType().getUrlComponent()
                 + "/" + purchaseContext.getPublicIdentifier()
-                + "/reservation/" + reservationId + "/book";
+                + "/reservation/" + reservationId;
+            String returnUrl = reservationBaseUrl + "/book";
+            // cancelUrl: vuelve al overview cuando el usuario cancela en Banchile
+            String cancelUrl = reservationBaseUrl + "/overview";
+            // notificationUrl: webhook S2S. Banchile lo llama al estado final (documentado en
+            // Transacción Completa / Notificaciones). Banchile reemplazará el placeholder
+            // path-variable {reservationId} con el reservationId real cuando llame al webhook.
+            String notificationUrl = alfioBaseUrl + "/api/payment/webhook/banchile/reservation/" + reservationId;
 
             // Expiración: 30 minutos desde ahora
             String expiration = purchaseContext.now(clockProvider).plusMinutes(30).toInstant().toString();
@@ -195,6 +201,8 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                 null, // buyer opcional — no disponible en spec básica
                 payment,
                 returnUrl,
+                cancelUrl,
+                notificationUrl,
                 "0.0.0.0", // IP no disponible en PaymentSpecification
                 "alfio/banchile",
                 expiration
@@ -247,13 +255,13 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     // -------------------------------------------------------------------------
 
     /**
-     * Retorna la clave del webhook secret para que el framework verifique la firma
-     * a nivel de controlador (si aplica). En Banchile la validación se hace dentro
-     * de processWebhook.
+     * Banchile firma webhooks con el mismo secretKey de la integración. La validación
+     * real se hace dentro de processWebhook, así que retornamos el secretKey del
+     * configurationLevel adecuado para que el framework lo tenga disponible.
      */
     @Override
     public String getWebhookSignatureKey(ConfigurationLevel configurationLevel) {
-        return configurationManager.getForSystem(BANCHILE_WEBHOOK_SECRET).getValue().orElse(null);
+        return configurationManager.getFor(BANCHILE_TRANKEY, configurationLevel).getValue().orElse(null);
     }
 
     /**
@@ -288,7 +296,7 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      *
      * <p>Flujo:
      * <ol>
-     *   <li>Valida la firma HMAC-SHA1</li>
+     *   <li>Valida la firma SHA-256 contra el secretKey del comercio</li>
      *   <li>Verifica idempotencia (si ya está COMPLETE, no confirma de nuevo)</li>
      *   <li>Consulta el estado remoto vía querySession para evitar spoofing</li>
      *   <li>Mapea el estado Banchile → Transaction.Status y actualiza Alfio</li>
@@ -305,38 +313,33 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
         BanchileWebhookPayload whPayload = banchilePayload.getWebhookPayload();
 
         try {
-            // --- Validación de firma ---
-            String webhookSecret = configurationManager.getForSystem(BANCHILE_WEBHOOK_SECRET)
-                .getValue().orElse(null);
-
-            if (webhookSecret != null && whPayload.signature() != null) {
-                if (!validateWebhookSignature(whPayload, webhookSecret)) {
-                    log.warn("Firma de webhook Banchile inválida para requestId={}", whPayload.requestId());
-                    return PaymentWebhookResult.error("firma inválida");
-                }
-            } else {
-                // Si no hay secret configurado o la firma viene nula, loguear y continuar
-                // (útil en sandbox donde Banchile puede no firmar los webhooks)
-                log.debug("Webhook Banchile sin validación de firma (secret o firma ausente) requestId={}",
-                    whPayload.requestId());
-            }
-
-            // --- Idempotencia: si ya está COMPLETE, no hacer nada ---
+            // --- Idempotencia first: si ya está COMPLETE, devolver NOT_RELEVANT sin validar firma ---
             if (transaction.getStatus() == Transaction.Status.COMPLETE) {
                 log.info("Webhook Banchile recibido para transacción ya COMPLETE requestId={}, ignorando",
                     whPayload.requestId());
                 return PaymentWebhookResult.notRelevant("already_complete");
             }
 
-            // --- Obtener configuración para consultar el estado remoto ---
+            // --- Obtener configuración (secretKey usado para auth y firma del webhook) ---
             var purchaseContext = paymentContext.getPurchaseContext();
             var configuration = getConfiguration(purchaseContext.getConfigurationLevel());
-            String login   = configuration.get(BANCHILE_LOGIN).getRequiredValue();
-            String tranKey = configuration.get(BANCHILE_TRANKEY).getRequiredValue();
-            String baseUrl = configuration.get(BANCHILE_BASE_URL).getRequiredValue();
+            String login     = configuration.get(BANCHILE_LOGIN).getRequiredValue();
+            String secretKey = configuration.get(BANCHILE_TRANKEY).getRequiredValue();
+            String baseUrl   = configuration.get(BANCHILE_BASE_URL).getRequiredValue();
+
+            // --- Validación de firma (SHA-256(requestId + status.status + status.date + secretKey)) ---
+            if (whPayload.signature() != null) {
+                if (!validateWebhookSignature(whPayload, secretKey)) {
+                    log.warn("Firma de webhook Banchile inválida para requestId={}", whPayload.requestId());
+                    return PaymentWebhookResult.error("firma inválida");
+                }
+            } else {
+                log.debug("Webhook Banchile sin signature — confiando solo en querySession para requestId={}",
+                    whPayload.requestId());
+            }
 
             // --- Consultar estado remoto para evitar spoofing ---
-            Auth freshAuth = BanchilePagosClient.buildAuth(login, tranKey);
+            Auth freshAuth = BanchilePagosClient.buildAuth(login, secretKey);
             SessionResponse remoteSession = banchilePagosClient.querySession(
                 whPayload.requestId(), freshAuth, baseUrl
             );
@@ -366,13 +369,14 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                         return PaymentWebhookResult.error("reserva no procesable");
                     }
 
+                    Map<String, String> metadata = buildBanchileMetadata(transaction, whPayload, remoteSession, banchileStatus);
                     transactionRepository.update(
                         transaction.getId(),
                         requestIdStr, requestIdStr,
                         now,
                         0L, 0L,
                         Transaction.Status.COMPLETE,
-                        transaction.getMetadata()
+                        metadata
                     );
 
                     log.info("Pago Banchile APPROVED — reserva={} requestId={}",
@@ -381,13 +385,14 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                 }
 
                 case FAILED -> {
+                    Map<String, String> metadata = buildBanchileMetadata(transaction, whPayload, remoteSession, banchileStatus);
                     transactionRepository.update(
                         transaction.getId(),
                         requestIdStr, requestIdStr,
                         now,
                         transaction.getPlatformFee(), transaction.getGatewayFee(),
                         Transaction.Status.FAILED,
-                        transaction.getMetadata()
+                        metadata
                     );
                     log.info("Pago Banchile FAILED (status={}) — reserva={} requestId={}",
                         banchileStatus, transaction.getReservationId(), requestIdStr);
@@ -425,6 +430,11 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     /**
      * Fuerza la re-verificación del estado del pago consultando directamente a Banchile.
      * Usado por el scheduler de Alfio para reconciliar reservas en limbo.
+     *
+     * <p>En estados finales (COMPLETE/FAILED) persiste el metadata banchile_* con
+     * todos los detalles de la transacción (auth, internalReference, etc.) — mismo
+     * comportamiento que processWebhook. Esto cubre el caso polling cuando el webhook
+     * entrante no llegó (común en sandbox sin panel de comercio).
      */
     @Override
     public PaymentWebhookResult forceTransactionCheck(TicketReservation reservation,
@@ -446,9 +456,36 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             }
 
             String banchileStatus = remoteSession.status().status();
-            // Reutilizamos el mismo payload vacío: la lógica real está en processWebhook
-            // Aquí retornamos solo el resultado sin modificar estado (lo hace el caller)
-            return switch (mapStatus(banchileStatus)) {
+            Transaction.Status alfioStatus = mapStatus(banchileStatus);
+
+            // Persistir metadata en estados finales (incluso cuando se llega vía polling y
+            // no por webhook). En PENDING se preserva el metadata existente.
+            if (alfioStatus == Transaction.Status.COMPLETE || alfioStatus == Transaction.Status.FAILED) {
+                // Construir un payload sintético para reusar el helper de metadata.
+                // El payload del webhook no está disponible en este path (es polling), así que
+                // se usan los datos que SÍ tenemos: requestId del transaction y status remoto.
+                var syntheticPayload = new alfio.model.transaction.banchile.BanchileWebhookPayload(
+                    requestId,
+                    null,                              // reference: no disponible en este path
+                    remoteSession.status(),
+                    null                               // signature: no aplica (no es un webhook entrante)
+                );
+                Map<String, String> metadata = buildBanchileMetadata(transaction, syntheticPayload, remoteSession, banchileStatus);
+                String requestIdStr = String.valueOf(requestId);
+                java.time.ZonedDateTime now = purchaseContext.now(clockProvider);
+                transactionRepository.update(
+                    transaction.getId(),
+                    requestIdStr, requestIdStr,
+                    now,
+                    transaction.getPlatformFee(), transaction.getGatewayFee(),
+                    alfioStatus,
+                    metadata
+                );
+                log.info("forceTransactionCheck Banchile {} — reserva={} requestId={}",
+                    alfioStatus, reservation.getId(), requestIdStr);
+            }
+
+            return switch (alfioStatus) {
                 case COMPLETE -> PaymentWebhookResult.successful(new BanchilePaymentToken(transaction.getPaymentId()));
                 case FAILED   -> PaymentWebhookResult.failed(banchileStatus);
                 default       -> PaymentWebhookResult.notRelevant(banchileStatus);
@@ -570,6 +607,89 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     // Helpers privados
     // -------------------------------------------------------------------------
 
+    /**
+     * Construye el {@code metadata Map<String,String>} que se persiste en
+     * {@code b_transaction.metadata} (columna jsonb) con prefijo {@code banchile_*}.
+     *
+     * <p>Preserva todo metadata previamente persistido en {@link Transaction#getMetadata()}
+     * y agrega los campos extraídos del payload del webhook + la respuesta de
+     * {@code querySession} (ground truth remoto). Si el primer {@code PaymentDetails}
+     * APPROVED no existe (rechazo), cae al primer intento de pago disponible.
+     *
+     * <p>Solo invocar en estados finales (COMPLETE / FAILED). En PENDING, preservar
+     * intacto el metadata actual.
+     *
+     * @param transaction    Transacción Alfio (puede tener metadata previo de createSession)
+     * @param whPayload      Payload del webhook entrante
+     * @param remoteSession  Respuesta de querySession (ground truth)
+     * @param banchileStatus Status string de Banchile (e.g., "APPROVED", "REJECTED")
+     * @return Mapa con prefijo {@code banchile_*} más todo metadata previo del transaction
+     */
+    private static Map<String, String> buildBanchileMetadata(Transaction transaction,
+                                                              alfio.model.transaction.banchile.BanchileWebhookPayload whPayload,
+                                                              SessionResponse remoteSession,
+                                                              String banchileStatus) {
+        Map<String, String> metadata = new HashMap<>();
+        if (transaction.getMetadata() != null) {
+            metadata.putAll(transaction.getMetadata());
+        }
+
+        if (whPayload != null && whPayload.requestId() != null) {
+            metadata.put("banchile_request_id", String.valueOf(whPayload.requestId()));
+        }
+        if (whPayload != null && whPayload.reference() != null) {
+            metadata.put("banchile_reference", whPayload.reference());
+        }
+        if (banchileStatus != null) {
+            metadata.put("banchile_status", banchileStatus);
+        }
+        if (remoteSession != null && remoteSession.status() != null) {
+            var st = remoteSession.status();
+            if (st.date() != null)    metadata.put("banchile_status_date", st.date());
+            if (st.reason() != null)  metadata.put("banchile_status_reason", st.reason());
+            if (st.message() != null) metadata.put("banchile_status_message", st.message());
+        }
+
+        // PaymentDetails: preferir el APPROVED, sino caer al primero disponible (útil para rechazos)
+        SessionResponse.PaymentDetails pd = null;
+        if (remoteSession != null) {
+            pd = remoteSession.firstApprovedPayment();
+            if (pd == null && remoteSession.payment() != null && !remoteSession.payment().isEmpty()) {
+                pd = remoteSession.payment().get(0);
+            }
+        }
+        if (pd != null) {
+            if (pd.internalReference() != null)
+                metadata.put("banchile_internal_reference", String.valueOf(pd.internalReference()));
+            if (pd.authorization() != null)
+                metadata.put("banchile_authorization", pd.authorization());
+            if (pd.paymentMethod() != null)
+                metadata.put("banchile_payment_method", pd.paymentMethod());
+            if (pd.paymentMethodName() != null)
+                metadata.put("banchile_payment_method_name", pd.paymentMethodName());
+            if (pd.issuerName() != null)
+                metadata.put("banchile_issuer", pd.issuerName());
+            if (pd.franchise() != null)
+                metadata.put("banchile_franchise", pd.franchise());
+            if (pd.receipt() != null)
+                metadata.put("banchile_receipt", pd.receipt());
+            if (Boolean.TRUE.equals(pd.refunded()))
+                metadata.put("banchile_refunded", "true");
+
+            // Aplanar processorFields[] como banchile_pf_<keyword> = <value>
+            // (solo cuando value es String — otros tipos se omiten para mantener Map<String,String>)
+            if (pd.processorFields() != null) {
+                for (var f : pd.processorFields()) {
+                    if (f != null && f.keyword() != null && f.value() instanceof String stringValue) {
+                        metadata.put("banchile_pf_" + f.keyword(), stringValue);
+                    }
+                }
+            }
+        }
+
+        return metadata;
+    }
+
     private Map<ConfigurationKeys, MaybeConfiguration> getConfiguration(ConfigurationLevel configurationLevel) {
         return configurationManager.getFor(ALL_OPTIONS, configurationLevel);
     }
@@ -584,33 +704,60 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     /**
      * Valida la firma del webhook de Banchile.
      *
-     * <p>Fórmula esperada según especificación:
-     * {@code Base64(SHA1(requestId + status + date + WEBHOOK_SECRET))}
+     * <p>Fórmula según doc oficial Web Checkout (Notificaciones / Verificación de Firma):
+     * {@code SHA-256(requestId + status.status + status.date + secretKey)}
      *
-     * <p><b>TODO:</b> confirmar esta fórmula contra el primer webhook real capturado
-     * en Phase F del plan de integración. El spec interno no ha sido validado contra
-     * un webhook real de Banchile en producción.
+     * <p>El campo {@code signature} llega con el prefijo {@code sha256:} que se descarta
+     * antes de la comparación. El digest se compara como hex lowercase contra el
+     * receivedSignature. Si Banchile devuelve el digest en Base64 en lugar de hex,
+     * se acepta también como fallback (la doc no es explícita y el ejemplo está truncado).
      *
-     * @param payload       Payload del webhook entrante
-     * @param webhookSecret Secret configurado en Alfio
+     * @param payload   Payload del webhook entrante
+     * @param secretKey Secret key del comercio (mismo valor usado en auth.tranKey)
      * @return true si la firma es válida, false en caso contrario
      */
-    private boolean validateWebhookSignature(BanchileWebhookPayload payload, String webhookSecret) {
+    private boolean validateWebhookSignature(BanchileWebhookPayload payload, String secretKey) {
         try {
-            String status = payload.status() != null ? payload.status().status() : "";
-            String date   = payload.status() != null ? payload.status().date() : "";
-            String input  = payload.requestId() + status + date + webhookSecret;
+            String statusStr = payload.status() != null ? payload.status().status() : "";
+            String dateStr   = payload.status() != null ? payload.status().date()   : "";
+            String input     = payload.requestId() + statusStr + dateStr + secretKey;
 
-            // SHA-1 requerido por el protocolo Banchile/PlacetoPay
-            // nosemgrep: java.lang.security.audit.crypto.use-of-sha1.use-of-sha1
-            MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
-            byte[] digest = sha1.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            String expected = Base64.getEncoder().encodeToString(digest);
+            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+            byte[] digest = sha256.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
-            return expected.equals(payload.signature());
+            String expectedHex    = bytesToHex(digest);
+            String expectedBase64 = Base64.getEncoder().encodeToString(digest);
+
+            String received = payload.signature();
+            if (received.regionMatches(true, 0, "sha256:", 0, "sha256:".length())) {
+                received = received.substring("sha256:".length());
+            }
+
+            return constantTimeEquals(received, expectedHex)
+                || constantTimeEquals(received, expectedBase64);
         } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-1 no disponible en este JDK", e);
+            throw new IllegalStateException("SHA-256 no disponible en este JDK", e);
         }
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null || a.length() != b.length()) {
+            return false;
+        }
+        int diff = 0;
+        for (int i = 0; i < a.length(); i++) {
+            diff |= a.charAt(i) ^ b.charAt(i);
+        }
+        return diff == 0;
     }
 
     // -------------------------------------------------------------------------
