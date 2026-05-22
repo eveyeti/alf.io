@@ -81,7 +81,7 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
     private static final Logger log = LoggerFactory.getLogger(BanchilePagosWebhookManager.class);
 
-    public static final String WEBHOOK_URL_TEMPLATE = "/api/payment/webhook/banchile/reservation/{reservationId}";
+    public static final String WEBHOOK_URL_TEMPLATE = "/api/payment/webhook/banchile";
 
     protected static final Set<ConfigurationKeys> ALL_OPTIONS = EnumSet.of(
         BANCHILE_ENABLED,
@@ -187,10 +187,11 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             String returnUrl = reservationBaseUrl + "/book";
             // cancelUrl: vuelve al overview cuando el usuario cancela en Banchile
             String cancelUrl = reservationBaseUrl + "/overview";
-            // notificationUrl: webhook S2S. Banchile lo llama al estado final (documentado en
-            // Transacción Completa / Notificaciones). Banchile reemplazará el placeholder
-            // path-variable {reservationId} con el reservationId real cuando llame al webhook.
-            String notificationUrl = alfioBaseUrl + "/api/payment/webhook/banchile/reservation/" + reservationId;
+            // notificationUrl: webhook S2S fijo (sin reservationId en el path). El controller
+            // extrae el reservation del campo `reference` del body. Banchile WebCheckout
+            // descarta este campo y usa la URL registrada en el panel de comercios, así que
+            // este valor se envía por completitud pero Banchile no lo respeta.
+            String notificationUrl = alfioBaseUrl + WEBHOOK_URL_TEMPLATE;
 
             // Expiración: 30 minutos desde ahora
             String expiration = purchaseContext.now(clockProvider).plusMinutes(30).toInstant().toString();

@@ -20,10 +20,13 @@ import alfio.manager.PurchaseContextManager;
 import alfio.manager.TicketReservationManager;
 import alfio.model.transaction.PaymentContext;
 import alfio.model.transaction.PaymentProxy;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -32,23 +35,50 @@ import java.util.Map;
 
 import static alfio.manager.payment.BanchilePagosWebhookManager.WEBHOOK_URL_TEMPLATE;
 
+/**
+ * Endpoint público que recibe los webhooks de Banchile Pagos.
+ *
+ * <p>Banchile WebCheckout descarta el campo {@code notificationUrl} de la petición
+ * createSession — la URL del webhook se registra UNA sola vez en el panel de comercios,
+ * sin placeholders dinámicos. Por eso el endpoint es fijo y el reservationId se extrae
+ * del campo {@code reference} del body (UUID sin guiones, 32 chars hex).
+ */
 @RestController
 @AllArgsConstructor
 public class BanchilePaymentWebhookController {
+
+    private static final Logger log = LoggerFactory.getLogger(BanchilePaymentWebhookController.class);
+
     private final TicketReservationManager ticketReservationManager;
     private final PurchaseContextManager purchaseContextManager;
+    private final ObjectMapper objectMapper;
 
     @PostMapping(WEBHOOK_URL_TEMPLATE)
-    public ResponseEntity<String> receivePaymentConfirmation(@RequestBody String body,
-                                                             @PathVariable String reservationId) {
-        return purchaseContextManager.findByReservationId(reservationId)
+    public ResponseEntity<String> receivePaymentConfirmation(@RequestBody String body) {
+        String reservationId;
+        try {
+            JsonNode root = objectMapper.readTree(body);
+            String reference = root.path("reference").asText(null);
+            reservationId = reservationIdFromReference(reference);
+        } catch (Exception e) {
+            log.warn("Webhook Banchile con body malformado: {}", e.getMessage());
+            return ResponseEntity.badRequest().body("malformed body");
+        }
+
+        if (reservationId == null) {
+            log.warn("Webhook Banchile sin reference válida en el body");
+            return ResponseEntity.badRequest().body("missing reference");
+        }
+
+        final String resId = reservationId;
+        return purchaseContextManager.findByReservationId(resId)
             .map(purchaseContext -> {
                 var result = ticketReservationManager.processTransactionWebhook(
                     body,
                     null,
                     PaymentProxy.BANCHILE,
-                    Map.of("reservationId", reservationId),
-                    new PaymentContext(purchaseContext, reservationId)
+                    Map.of("reservationId", resId),
+                    new PaymentContext(purchaseContext, resId)
                 );
                 if (result.isSuccessful()) {
                     return ResponseEntity.ok("OK");
@@ -57,6 +87,28 @@ public class BanchilePaymentWebhookController {
                 }
                 return ResponseEntity.ok(result.getReason());
             })
-            .orElseGet(() -> ResponseEntity.badRequest().body("NOK"));
+            .orElseGet(() -> {
+                log.warn("Webhook Banchile para reservation desconocida: {}", resId);
+                return ResponseEntity.badRequest().body("NOK");
+            });
+    }
+
+    /**
+     * Reconstruye el UUID con guiones a partir del campo {@code reference} del webhook.
+     * Banchile rechaza UUIDs con guiones en {@code payment.reference}, así que el fork
+     * envía {@code reservationId.replace("-", "")} (32 chars hex). Aquí hacemos la
+     * operación inversa.
+     *
+     * @return UUID con formato 8-4-4-4-12, o {@code null} si el reference no es válido
+     */
+    static String reservationIdFromReference(String reference) {
+        if (reference == null || reference.length() != 32 || !reference.matches("[0-9a-fA-F]{32}")) {
+            return null;
+        }
+        return reference.substring(0, 8) + "-"
+            + reference.substring(8, 12) + "-"
+            + reference.substring(12, 16) + "-"
+            + reference.substring(16, 20) + "-"
+            + reference.substring(20, 32);
     }
 }
