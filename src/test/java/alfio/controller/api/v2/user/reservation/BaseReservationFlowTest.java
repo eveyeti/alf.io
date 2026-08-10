@@ -209,7 +209,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
 
         // add additional fields before and after, with one mandatory
         var af = new AdditionalFieldRequest(-1, true, "field1", "text", true, false,null, null, null,
-            Map.of("en", new EventModification.Description("field en", "", null)), null, null);
+            Map.of("en", new EventModification.Description("field en", "", null)), null, null, false);
         purchaseContextFieldManager.addAdditionalField(context.event, af);
 
         var afId = purchaseContextFieldRepository.findAdditionalFieldsForEvent(context.event.getId()).get(0).getId();
@@ -217,7 +217,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         purchaseContextFieldRepository.updateFieldOrder(afId, -1);
 
         var af2 = new AdditionalFieldRequest(1, true, "field2", "text", false, false,null, null, null,
-            Map.of("en", new EventModification.Description("field2 en", "", null)), null, null);
+            Map.of("en", new EventModification.Description("field2 en", "", null)), null, null, false);
         purchaseContextFieldManager.addAdditionalField(context.event, af2);
         //
 
@@ -230,7 +230,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         //
 
         var af3 = new AdditionalFieldRequest(2, true, "field3", "text", true, false, null, null, null,
-            Map.of("en", new EventModification.Description("field3 en", "", null)), addServRes.getBody(), null);
+            Map.of("en", new EventModification.Description("field3 en", "", null)), addServRes.getBody(), null, false);
         purchaseContextFieldManager.addAdditionalField(context.event, af3);
 
 

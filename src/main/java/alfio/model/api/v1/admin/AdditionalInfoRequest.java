@@ -77,7 +77,8 @@ public class AdditionalInfoRequest {
             restrictedValueList,
             toDescriptionMap(EventCreationRequest.orEmpty(label), EventCreationRequest.orEmpty(placeholder), EventCreationRequest.orEmpty(this.restrictedValues)),
             null,
-            null);
+            null,
+            false);
     }
 
     private static Map<String, EventModification.Description> toDescriptionMap(List<DescriptionRequest> label,
