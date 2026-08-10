@@ -49,6 +49,20 @@
     <div class="page-header" ng-if="field.type && field.type !== 'country'">
         <h3>Configuration</h3>
         <small>Settings for type '{{field | fieldType}}'</small>
+
+        <div class="form-group">
+            <div class="col-xs-12">
+                <div class="checkbox">
+                    <label>
+                        <input type="checkbox" ng-model="field.askOnlyFirstTicket">
+                        Preguntar solo en la primera entrada de la compra
+                    </label>
+                </div>
+                <span class="help-block">
+                    Útil para datos que corresponden a la transacción completa y no a cada asistente.
+                </span>
+            </div>
+        </div>
     </div>
 
     <div class="alert alert-info" ng-if="field.type === 'vat:eu'">
@@ -83,7 +97,7 @@
 
     <div class="row">
         <div class="col-xs-12" ng-if="field.type !== 'country'">
-            <div data-ng-if="field.type === 'select' || field.type === 'radio' || field.type === 'checkbox'" class="form-horizontal">
+            <div data-ng-if="field.type === 'select' || field.type === 'select:searchable' || field.type === 'radio' || field.type === 'checkbox'" class="form-horizontal">
                 <div data-ng-repeat="restrictedValue in field.restrictedValues">
                     <div class="form-group">
                         <div class="col-xs-12">

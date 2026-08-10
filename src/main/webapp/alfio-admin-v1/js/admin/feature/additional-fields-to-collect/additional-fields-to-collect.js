@@ -6,6 +6,7 @@
         'input:tel': 'Phone Number',
         'textarea': 'Multi-line Text',
         'select': 'Drop-down list',
+        'select:searchable': 'Drop-down list with search',
         'checkbox': 'Multiple choice (checkbox)',
         'radio': 'One choice list (radio button)',
         'country': 'Country',
