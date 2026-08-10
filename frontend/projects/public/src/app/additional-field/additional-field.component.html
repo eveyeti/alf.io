@@ -23,6 +23,17 @@
           <option value=""></option>
           <option *ngFor="let c of field.restrictedValues" [ngValue]="c">{{getRestrictedValueLabel(c)}}</option>
       </select>
+      <ng-select *ngSwitchCase="'select:searchable'"
+                 [attr.id]="elementUUID + '-' + field.name"
+                 formControlName="0"
+                 appInvalidFeedback
+                 [items]="searchableItems"
+                 bindLabel="label"
+                 bindValue="value"
+                 [searchable]="true"
+                 [clearable]="true"
+                 [inputAttrs]="{autocomplete: 'nope'}">
+      </ng-select>
       <div *ngSwitchCase="'checkbox'" [attr.id]="elementUUID + '-' + field.name" appInvalidFeedback [invalidFeedbackFieldName]="field.name" [invalidFeedbackForm]="form">
         <div *ngFor="let c of field.restrictedValues; let i = index; let isFirst = first" class="form-check">
           <input class="form-check-input" [attr.id]="elementUUID + '-' + field.name + '-' + i" type="checkbox" [formControlName]="i" (ngModelChange)="selectedCheckBox(i, c, $event)">{{' '}}

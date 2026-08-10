@@ -99,6 +99,13 @@ export class AdditionalFieldComponent implements OnInit, OnDestroy {
     }
   }
 
+  get searchableItems(): {value: string; label: string}[] {
+    return (this.field.restrictedValues || []).map(value => ({
+      value,
+      label: this.getRestrictedValueLabel(value)
+    }));
+  }
+
   selectedCheckBox(index: number, value: string, checked: boolean) {
     const fa = this.form.get([this.field.name]) as UntypedFormArray;
     fa.controls[index].setValue(checked ? value : null, {emitEvent: false, emitViewToModelChange: false});
