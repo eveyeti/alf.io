@@ -331,6 +331,10 @@ public final class Validator {
             return purchaseContextFields;
         }
 
+        static boolean shouldShowField(PurchaseContextFieldConfiguration field, boolean isFirstTicket) {
+            return !field.isAskOnlyFirstTicket() || isFirstTicket;
+        }
+
         private static List<PurchaseContextFieldConfiguration> filterFieldsForTicket(List<PurchaseContextFieldConfiguration> additionalFieldsForEvent,
                                                                                      Ticket ticket,
                                                                                      Set<Integer> additionalServiceIds,
@@ -345,7 +349,7 @@ public final class Validator {
                         return false;
                     }
                     if (f.getContext() == PurchaseContextFieldConfiguration.Context.ATTENDEE) {
-                        return true;
+                        return shouldShowField(f, isFirstTicket);
                     }
                     // field context is "Additional Service"
                     if (!isFirstTicket && !eventSupportsAdditionalFieldsLink) {

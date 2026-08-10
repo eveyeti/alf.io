@@ -373,6 +373,27 @@ class ValidatorTest {
         assertFalse(errors.hasErrors());
     }
 
+    private static PurchaseContextFieldConfiguration attendeeField(boolean askOnlyFirstTicket) {
+        return new PurchaseContextFieldConfiguration(1, 1, null, "alumno", 1,
+            "select:searchable", null, null, false, true, null,
+            PurchaseContextFieldConfiguration.Context.ATTENDEE, null, null, null,
+            askOnlyFirstTicket);
+    }
+
+    @Test
+    void attendeeFieldWithoutFlagIsShownOnEveryTicket() {
+        var field = attendeeField(false);
+        assertTrue(Validator.AdditionalFieldsFilterer.shouldShowField(field, true));
+        assertTrue(Validator.AdditionalFieldsFilterer.shouldShowField(field, false));
+    }
+
+    @Test
+    void attendeeFieldWithFlagIsShownOnlyOnFirstTicket() {
+        var field = attendeeField(true);
+        assertTrue(Validator.AdditionalFieldsFilterer.shouldShowField(field, true));
+        assertFalse(Validator.AdditionalFieldsFilterer.shouldShowField(field, false));
+    }
+
     private static Supplier<DateTimeModification> safeParse(String dateTime) {
         return () -> {
             if (StringUtils.isEmpty(dateTime)) {
