@@ -120,7 +120,7 @@ public class PurchaseContextFieldManager {
         }
 
         long configurationId = purchaseContextFieldRepository.insertConfiguration(eventIdOrNull(purchaseContext), purchaseContext.getOrganizationId(), descriptorIdOrNull(purchaseContext), f.getName(), order, f.getType(), serializedRestrictedValues,
-            f.getMaxLength(), f.getMinLength(), f.isRequired(), context, additionalServiceId, generateJsonForList(f.getLinkedCategoriesIds())).getKey();
+            f.getMaxLength(), f.getMinLength(), f.isRequired(), context, additionalServiceId, generateJsonForList(f.getLinkedCategoriesIds()), false).getKey();
         f.getDescription().forEach((locale, value) -> purchaseContextFieldRepository.upsertDescription(configurationId, locale, Json.GSON.toJson(value), purchaseContext.getOrganizationId()));
     }
 
