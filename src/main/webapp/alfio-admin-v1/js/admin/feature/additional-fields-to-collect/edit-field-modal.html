@@ -98,6 +98,13 @@
     <div class="row">
         <div class="col-xs-12" ng-if="field.type !== 'country'">
             <div data-ng-if="field.type === 'select' || field.type === 'select:searchable' || field.type === 'radio' || field.type === 'checkbox'" class="form-horizontal">
+                <div class="form-group" ng-if="field.type === 'select:searchable'">
+                    <div class="col-xs-12">
+                        <button type="button" class="btn btn-default" ng-click="loadRoster()">
+                            Cargar roster de la organización
+                        </button>
+                    </div>
+                </div>
                 <div data-ng-repeat="restrictedValue in field.restrictedValues">
                     <div class="form-group">
                         <div class="col-xs-12">

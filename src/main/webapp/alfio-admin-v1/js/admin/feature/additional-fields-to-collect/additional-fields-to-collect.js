@@ -319,6 +319,42 @@
                         return (selectedLanguages & lang) > 0;
                     };
 
+                    // Roster a nivel organización: llena field.restrictedValues + las etiquetas
+                    // localizadas (es/it/en) a partir de ADDITIONAL_FIELD_ROSTER. Debe escribir en
+                    // 'restrictedValues' (no 'restrictedValuesDescription'): ese es el nombre de
+                    // propiedad que el backend espera al GUARDAR el campo (ver AdditionalFieldRequest /
+                    // UpdateAdditionalField). 'restrictedValuesDescription' solo existe en la respuesta
+                    // de LECTURA pública; si se escribe ahí, el guardado la descarta en silencio y el
+                    // comprador vuelve a ver el UUID crudo.
+                    $scope.loadRoster = function() {
+                        var organizationId = ($scope.event || $scope.subscriptionDescriptor).organizationId;
+                        AdditionalFieldsService.loadRoster(organizationId).then(function(res) {
+                            var roster = res.data;
+                            var field = $scope.field;
+                            var addNew = $scope.addNewField;
+
+                            field.restrictedValues = roster.map(function(entry) {
+                                return addNew ? { value: entry.value, enabled: true } : entry.value;
+                            });
+
+                            ['es', 'it', 'en'].forEach(function(lang) {
+                                field.description[lang] = field.description[lang] || {};
+                                var labels = roster.reduce(function(acc, entry) {
+                                    acc[entry.value] = entry.label;
+                                    return acc;
+                                }, {});
+                                if (addNew) {
+                                    field.description[lang].restrictedValues = labels;
+                                } else {
+                                    field.description[lang].description = field.description[lang].description || {};
+                                    field.description[lang].description.restrictedValues = labels;
+                                }
+                            });
+                        }, function() {
+                            alert('No se pudo cargar el roster. Revisa que ADDITIONAL_FIELD_ROSTER de la organización tenga un JSON válido.');
+                        });
+                    };
+
                     $scope.editField = function (form, field) {
                         if (angular.isDefined(field.id)) {
                             AdditionalFieldsService.updateField(ctrl.purchaseContextType, ctrl.publicIdentifier, field).then(function () {
@@ -451,6 +487,9 @@
             },
             getDynamicFieldTemplates: function(purchaseContextType, publicIdentifier) {
                 return $http['get']('/admin/api/'+purchaseContextType+'/'+publicIdentifier+'/additional-field/templates').error(HttpErrorHandler.handle);
+            },
+            loadRoster: function(organizationId) {
+                return $http.get('/admin/api/organization/'+organizationId+'/additional-field-roster').error(HttpErrorHandler.handle);
             },
         }
     }

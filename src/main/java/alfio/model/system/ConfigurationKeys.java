@@ -289,7 +289,9 @@ public enum ConfigurationKeys {
     BANCHILE_ENABLED("Banchile Pagos enabled (default false)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.BOOLEAN, false, EnumSet.of(SYSTEM, ORGANIZATION, PURCHASE_CONTEXT), BooleanUtils.FALSE),
     BANCHILE_LOGIN("Banchile public login ID (32-char hex provisto por Banchile)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
     BANCHILE_TRANKEY("Banchile secret key (provisto por Banchile, también usado para firmar webhooks vía SHA-256)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM, ORGANIZATION)),
-    BANCHILE_BASE_URL("Banchile API base URL (sandbox: https://checkout.test.banchilepagos.cl, prod: https://checkout.banchilepagos.cl)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM))
+    BANCHILE_BASE_URL("Banchile API base URL (sandbox: https://checkout.test.banchilepagos.cl, prod: https://checkout.banchilepagos.cl)", false, SettingCategory.PAYMENT_BANCHILE, ComponentType.TEXT, false, EnumSet.of(SYSTEM)),
+
+    ADDITIONAL_FIELD_ROSTER("Roster reutilizable para campos select (JSON: [{\"value\":\"id\",\"label\":\"texto\"}])", false, SettingCategory.GENERAL, ComponentType.TEXT, false, EnumSet.of(ORGANIZATION))
     ;
 
     @Getter
