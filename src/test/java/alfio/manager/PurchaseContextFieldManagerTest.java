@@ -61,11 +61,11 @@ class PurchaseContextFieldManagerTest {
     @ParameterizedTest
     @ValueSource(strings = {"select", "select:searchable", "checkbox", "radio"})
     void typesWithOptionsPersistRestrictedValues(String type) {
-        purchaseContextFieldManager.updateAdditionalField(1L, updateRequestFor(type), 1);
+        purchaseContextFieldManager.updateAdditionalField(1L, updateRequestFor(type, false), 1);
 
         ArgumentCaptor<String> restrictedValuesCaptor = ArgumentCaptor.forClass(String.class);
         verify(purchaseContextFieldRepository)
-            .updateField(eq(1L), eq(true), eq(true), restrictedValuesCaptor.capture(), any(), any());
+            .updateField(eq(1L), eq(true), eq(true), restrictedValuesCaptor.capture(), any(), any(), eq(false));
 
         assertEquals(Json.GSON.toJson(RESTRICTED_VALUES), restrictedValuesCaptor.getValue(),
             () -> "restrictedValues must be persisted for type '" + type + "'");
@@ -74,17 +74,33 @@ class PurchaseContextFieldManagerTest {
     @ParameterizedTest
     @ValueSource(strings = {"input:text", "input:tel", "textarea", "country", "vat:eu", "input:dateOfBirth"})
     void freeTextTypesDoNotPersistRestrictedValues(String type) {
-        purchaseContextFieldManager.updateAdditionalField(1L, updateRequestFor(type), 1);
+        purchaseContextFieldManager.updateAdditionalField(1L, updateRequestFor(type, false), 1);
 
         ArgumentCaptor<String> restrictedValuesCaptor = ArgumentCaptor.forClass(String.class);
         verify(purchaseContextFieldRepository)
-            .updateField(eq(1L), eq(true), eq(true), restrictedValuesCaptor.capture(), any(), any());
+            .updateField(eq(1L), eq(true), eq(true), restrictedValuesCaptor.capture(), any(), any(), eq(false));
 
         assertNull(restrictedValuesCaptor.getValue(),
             () -> "restrictedValues must NOT be persisted for type '" + type + "'");
     }
 
-    private static EventModification.UpdateAdditionalField updateRequestFor(String type) {
+    /**
+     * Regression test for the bug where editing an existing field never persisted
+     * askOnlyFirstTicket: the checkbox rendered the real value in edit mode (so it
+     * looked "live"), but FieldRepository#updateField's SQL never wrote the column,
+     * so toggling it and saving was a silent no-op. It only worked when creating a
+     * new field (insertConfiguration already bound it).
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void editingFieldPersistsAskOnlyFirstTicket(boolean askOnlyFirstTicket) {
+        purchaseContextFieldManager.updateAdditionalField(1L, updateRequestFor("input:text", askOnlyFirstTicket), 1);
+
+        verify(purchaseContextFieldRepository)
+            .updateField(eq(1L), eq(true), eq(true), any(), any(), any(), eq(askOnlyFirstTicket));
+    }
+
+    private static EventModification.UpdateAdditionalField updateRequestFor(String type, boolean askOnlyFirstTicket) {
         return new EventModification.UpdateAdditionalField(
             type,
             true,
@@ -92,6 +108,7 @@ class PurchaseContextFieldManagerTest {
             RESTRICTED_VALUES,
             List.of(),
             Map.of(),
-            List.of());
+            List.of(),
+            askOnlyFirstTicket);
     }
 }

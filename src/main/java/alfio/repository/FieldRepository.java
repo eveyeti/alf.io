@@ -46,13 +46,14 @@ interface FieldRepository {
                                                      @Bind("categoryIds") String categoryIdsJson,
                                                      @Bind("askOnlyFirstTicket") boolean askOnlyFirstTicket);
 
-    @Query("update purchase_context_field_configuration set field_required = :required, field_editable = :editable, field_restricted_values = :restrictedValues, field_disabled_values = :disabledValues, ticket_category_ids = :categoryIds where id = :id")
+    @Query("update purchase_context_field_configuration set field_required = :required, field_editable = :editable, field_restricted_values = :restrictedValues, field_disabled_values = :disabledValues, ticket_category_ids = :categoryIds, ask_only_first_ticket = :askOnlyFirstTicket where id = :id")
     int updateField(@Bind("id") long id,
                     @Bind("required") boolean required,
                     @Bind("editable") boolean editable,
                     @Bind("restrictedValues") String restrictedValues,
                     @Bind("disabledValues") String disabledValues,
-                    @Bind("categoryIds") String linkedCategoryIds);
+                    @Bind("categoryIds") String linkedCategoryIds,
+                    @Bind("askOnlyFirstTicket") boolean askOnlyFirstTicket);
 
     @Query("""
         insert into purchase_context_field_description(field_configuration_id_fk, field_locale, description, organization_id_fk)\

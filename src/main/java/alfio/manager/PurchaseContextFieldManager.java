@@ -126,7 +126,7 @@ public class PurchaseContextFieldManager {
 
     public void updateAdditionalField(long id, EventModification.UpdateAdditionalField f, int organizationId) {
         String serializedRestrictedValues = toSerializedRestrictedValues(f);
-        purchaseContextFieldRepository.updateField(id, f.isRequired(), !f.isReadOnly(), serializedRestrictedValues, toSerializedDisabledValues(f), generateJsonForList(f.getLinkedCategoriesIds()));
+        purchaseContextFieldRepository.updateField(id, f.isRequired(), !f.isReadOnly(), serializedRestrictedValues, toSerializedDisabledValues(f), generateJsonForList(f.getLinkedCategoriesIds()), f.isAskOnlyFirstTicket());
         f.getDescription().forEach((locale, value) -> {
             String val = Json.GSON.toJson(value.getDescription());
             purchaseContextFieldRepository.upsertDescription(id, locale, val, organizationId);
