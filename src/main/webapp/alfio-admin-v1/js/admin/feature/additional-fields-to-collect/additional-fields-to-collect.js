@@ -337,6 +337,7 @@
                                 return addNew ? { value: entry.value, enabled: true } : entry.value;
                             });
 
+                            field.description = field.description || {};
                             ['es', 'it', 'en'].forEach(function(lang) {
                                 field.description[lang] = field.description[lang] || {};
                                 var labels = roster.reduce(function(acc, entry) {
