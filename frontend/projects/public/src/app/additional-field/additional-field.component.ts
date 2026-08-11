@@ -27,6 +27,8 @@ export class AdditionalFieldComponent implements OnInit, OnDestroy {
 
   countries: LocalizedCountry[];
 
+  searchableItems: {value: string; label: string}[];
+
   isMobile = mobile;
 
   private subscriptions: Subscription[] = [];
@@ -46,6 +48,11 @@ export class AdditionalFieldComponent implements OnInit, OnDestroy {
   private initFieldSpecificValues(firstInit: boolean): void {
     if (this.field.type === 'country') {
       this.getCountries();
+    } else if (this.field.type === 'select:searchable') {
+      this.searchableItems = (this.field.restrictedValues || []).map(value => ({
+        value,
+        label: this.getRestrictedValueLabel(value)
+      }));
     } else if (this.field.type === 'input:dateOfBirth') {
       if (firstInit) {
         this.yesterday = new Date(new Date().getTime() - 24 * 60 * 60 * 1000)
@@ -97,13 +104,6 @@ export class AdditionalFieldComponent implements OnInit, OnDestroy {
     } else {
       return value;
     }
-  }
-
-  get searchableItems(): {value: string; label: string}[] {
-    return (this.field.restrictedValues || []).map(value => ({
-      value,
-      label: this.getRestrictedValueLabel(value)
-    }));
   }
 
   selectedCheckBox(index: number, value: string, checked: boolean) {

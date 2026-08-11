@@ -56,4 +56,4 @@ export class Field {
     fieldValue: string;
 }
 
-export type AdditionalFieldType = 'input:text' | 'input:tel' | 'vat:eu' | 'textarea' | 'country' | 'select' | 'checkbox' | 'radio' | 'input:dateOfBirth';
+export type AdditionalFieldType = 'input:text' | 'input:tel' | 'vat:eu' | 'textarea' | 'country' | 'select' | 'select:searchable' | 'checkbox' | 'radio' | 'input:dateOfBirth';
