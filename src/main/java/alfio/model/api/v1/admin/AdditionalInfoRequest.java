@@ -109,6 +109,7 @@ public class AdditionalInfoRequest {
         PHONE_NUMBER("input:tel"),
         MULTI_LINE_TEXT("textarea"),
         LIST_BOX("select"),
+        SEARCHABLE_LIST_BOX("select:searchable"),
         COUNTRY("country"),
         EU_VAT_NR("vat:eu"),
         CHECKBOX("checkbox"),
@@ -123,7 +124,7 @@ public class AdditionalInfoRequest {
 
     }
 
-    public static final Set<String> WITH_RESTRICTED_VALUES = Set.of(AdditionalInfoType.LIST_BOX.code, AdditionalInfoType.CHECKBOX.code, AdditionalInfoType.RADIO.code);
+    public static final Set<String> WITH_RESTRICTED_VALUES = Set.of(AdditionalInfoType.LIST_BOX.code, AdditionalInfoType.SEARCHABLE_LIST_BOX.code, AdditionalInfoType.CHECKBOX.code, AdditionalInfoType.RADIO.code);
 
     @Getter
     @AllArgsConstructor
