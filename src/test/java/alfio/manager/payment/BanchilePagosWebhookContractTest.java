@@ -16,6 +16,7 @@
  */
 package alfio.manager.payment;
 
+import alfio.manager.NotificationManager;
 import alfio.manager.support.PaymentWebhookResult;
 import alfio.manager.system.ConfigurationLevel;
 import alfio.manager.system.ConfigurationManager;
@@ -31,6 +32,7 @@ import alfio.model.transaction.banchile.CreateSessionRequest.Auth;
 import alfio.model.transaction.banchile.SessionResponse;
 import alfio.repository.TicketReservationRepository;
 import alfio.repository.TransactionRepository;
+import alfio.repository.user.OrganizationRepository;
 import alfio.test.util.TestUtil;
 import alfio.util.ClockProvider;
 import alfio.util.Json;
@@ -130,7 +132,9 @@ class BanchilePagosWebhookContractTest {
             banchilePagosClient,
             transactionRepository,
             ticketReservationRepository,
-            TestUtil.clockProvider()
+            TestUtil.clockProvider(),
+            mock(NotificationManager.class),
+            mock(OrganizationRepository.class)
         );
     }
 

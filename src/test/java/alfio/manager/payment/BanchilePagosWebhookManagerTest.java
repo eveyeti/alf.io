@@ -16,6 +16,7 @@
  */
 package alfio.manager.payment;
 
+import alfio.manager.NotificationManager;
 import alfio.manager.support.PaymentWebhookResult;
 import alfio.manager.system.ConfigurationLevel;
 import alfio.manager.system.ConfigurationManager;
@@ -33,6 +34,7 @@ import alfio.model.transaction.banchile.CreateSessionRequest.Auth;
 import alfio.model.transaction.banchile.SessionResponse;
 import alfio.repository.TicketReservationRepository;
 import alfio.repository.TransactionRepository;
+import alfio.repository.user.OrganizationRepository;
 import alfio.test.util.TestUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -75,6 +77,8 @@ class BanchilePagosWebhookManagerTest {
     private BanchilePagosClient   banchilePagosClient;
     private TransactionRepository transactionRepository;
     private TicketReservationRepository ticketReservationRepository;
+    private NotificationManager   notificationManager;
+    private OrganizationRepository organizationRepository;
     private Transaction           transaction;
     private Event                 event;
     private PaymentContext        paymentContext;
@@ -88,6 +92,8 @@ class BanchilePagosWebhookManagerTest {
         banchilePagosClient         = mock(BanchilePagosClient.class);
         transactionRepository       = mock(TransactionRepository.class);
         ticketReservationRepository = mock(TicketReservationRepository.class);
+        notificationManager         = mock(NotificationManager.class);
+        organizationRepository      = mock(OrganizationRepository.class);
 
         // Event mock con ZoneId para que purchaseContext.now(clockProvider) funcione
         event = mock(Event.class);
@@ -126,8 +132,53 @@ class BanchilePagosWebhookManagerTest {
             banchilePagosClient,
             transactionRepository,
             ticketReservationRepository,
-            TestUtil.clockProvider()
+            TestUtil.clockProvider(),
+            notificationManager,
+            organizationRepository
         );
+    }
+
+    // =========================================================================
+    // forceTransactionCheck — la alerta va antes de cerrar la transacción
+    // =========================================================================
+
+    /**
+     * Si la alerta no se puede encolar, la transacción no se cierra: sigue PENDING y la alerta se
+     * reintenta en la próxima consulta. Cerrarla antes de alertar (o sin alertar) perdería el único
+     * aviso de un pago aprobado que hay que reembolsar.
+     */
+    @Test
+    void forceTransactionCheckDoesNotCloseTheTransactionWhenTheAlertCannotBeQueued() {
+        var reservation = buildTicketReservation();
+        when(ticketReservationRepository.findOptionalStatusAndValidationById(RESERVATION_ID))
+            .thenReturn(Optional.of(new TicketReservationStatusAndValidation(TicketReservationStatus.CANCELLED, false)));
+        when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL))).thenReturn(approvedSession());
+        when(transaction.getPriceInCents()).thenReturn(24000);
+        when(transaction.getCurrency()).thenReturn("CLP");
+        when(event.getOrganizationId()).thenReturn(1);
+        var organization = mock(alfio.model.user.Organization.class);
+        when(organization.getEmail()).thenReturn("comite@example.com");
+        when(organizationRepository.getById(1)).thenReturn(organization);
+        doThrow(new IllegalStateException("no se pudo encolar el correo")).when(notificationManager)
+            .sendSimpleEmail(any(PurchaseContext.class), anyString(), anyString(), anyString(), any(alfio.manager.support.TemplateGenerator.class));
+
+        var result = manager.forceTransactionCheck(reservation, transaction, paymentContext);
+
+        assertEquals(PaymentWebhookResult.Type.ERROR, result.getType());
+        verify(transactionRepository, never()).update(anyInt(), any(), any(), any(), anyLong(), anyLong(), any(), any());
+
+        // el correo vuelve a funcionar: la consulta siguiente alerta y recién entonces cierra la transacción
+        doNothing().when(notificationManager)
+            .sendSimpleEmail(any(PurchaseContext.class), anyString(), anyString(), anyString(), any(alfio.manager.support.TemplateGenerator.class));
+
+        var retry = manager.forceTransactionCheck(reservation, transaction, paymentContext);
+
+        assertEquals(PaymentWebhookResult.Type.NOT_RELEVANT, retry.getType());
+        var inOrder = inOrder(notificationManager, transactionRepository);
+        inOrder.verify(notificationManager, times(2))
+            .sendSimpleEmail(eq(event), eq(RESERVATION_ID), eq("comite@example.com"), anyString(), any(alfio.manager.support.TemplateGenerator.class));
+        inOrder.verify(transactionRepository).update(eq(TRANSACTION_ID), eq(REQUEST_ID_STR), eq(REQUEST_ID_STR), any(),
+            eq(0L), eq(0L), eq(Transaction.Status.COMPLETE), anyMap());
     }
 
     // =========================================================================
@@ -536,6 +587,22 @@ class BanchilePagosWebhookManagerTest {
         );
         when(configurationManager.getFor(eq(BanchilePagosWebhookManager.ALL_OPTIONS), any()))
             .thenReturn(configMap);
+    }
+
+    /**
+     * Respuesta de querySession de un pago aprobado, con las claves que trae la respuesta real de
+     * Banchile (rq 34028) en cada intento de pago.
+     */
+    private static SessionResponse approvedSession() {
+        return alfio.util.Json.GSON.fromJson("""
+            {"requestId": 999,
+             "status": {"status": "APPROVED", "reason": "00", "message": "La petición ha sido aprobada exitosamente", "date": "2026-10-13T11:52:10-03:00"},
+             "payment": [{"status": {"status": "APPROVED", "reason": "00", "message": "Aprobada", "date": "2026-10-13T11:52:10-03:00"},
+                          "internalReference": 900999, "paymentMethod": "visa", "paymentMethodName": "Visa", "issuerName": "BANCO DE PRUEBA",
+                          "amount": {"from": {"total": 24000, "currency": "CLP"}, "to": {"total": 24000, "currency": "CLP"}, "factor": 1},
+                          "authorization": "000999", "reference": "REF999", "receipt": "6145999", "franchise": "visa", "refunded": false,
+                          "processorFields": [{"keyword": "lastDigits", "value": "4242", "displayOn": "none"}]}]}
+            """, SessionResponse.class);
     }
 
     /**

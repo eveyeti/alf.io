@@ -21,10 +21,12 @@ import alfio.config.support.EnumTypeColumnMapper;
 import alfio.config.support.JSONColumnMapper;
 import alfio.config.support.PlatformProvider;
 import alfio.extension.ExtensionService;
+import alfio.job.BanchileReconciliationJob;
 import alfio.job.Jobs;
 import alfio.job.executor.*;
 import alfio.manager.*;
 import alfio.manager.i18n.MessageSourceManager;
+import alfio.manager.payment.BanchilePagosWebhookManager;
 import alfio.manager.system.AdminJobManager;
 import alfio.manager.system.ConfigurationManager;
 import alfio.repository.*;
@@ -61,6 +63,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 import java.net.http.HttpClient;
@@ -251,6 +254,21 @@ public class DataSourceConfiguration {
             notificationManager, specialPriceTokenGenerator, ticketReservationManager,
             waitingQueueSubscriptionProcessor,
             adminJobManager);
+    }
+
+    @Bean
+    @DependsOn("migrator")
+    @Profile("!" + Initializer.PROFILE_DISABLE_JOBS)
+    public BanchileReconciliationJob banchileReconciliationJob(TransactionRepository transactionRepository,
+                                                               TicketReservationManager ticketReservationManager,
+                                                               TicketReservationRepository ticketReservationRepository,
+                                                               PurchaseContextManager purchaseContextManager,
+                                                               BanchilePagosWebhookManager banchilePagosWebhookManager,
+                                                               PlatformTransactionManager transactionManager,
+                                                               ClockProvider clockProvider) {
+        return new BanchileReconciliationJob(transactionRepository, ticketReservationManager,
+            ticketReservationRepository, purchaseContextManager, banchilePagosWebhookManager,
+            new TransactionTemplate(transactionManager), clockProvider);
     }
 
     @Bean

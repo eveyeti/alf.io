@@ -128,6 +128,35 @@ public interface TransactionRepository {
     @Query("select * from b_transaction where id = :id and status = :status")
     Optional<Transaction> loadOptionalByIdAndStatus(@Bind("id") int id, @Bind("status") Transaction.Status status);
 
+    @Query("select * from b_transaction where id = :id and status = :status for update")
+    Optional<Transaction> loadOptionalByIdAndStatusForUpdate(@Bind("id") int id, @Bind("status") Transaction.Status status);
+
+    /**
+     * Todas las transacciones de la reserva con ese proveedor, en cualquier estado (también INVALID),
+     * en el orden en que se crearon.
+     */
+    @Query(SELECT_BY_RESERVATION_ID + " and payment_proxy = :paymentProxy order by id")
+    List<Transaction> findAllByReservationIdAndPaymentProxy(@Bind("reservationId") String reservationId,
+                                                            @Bind("paymentProxy") PaymentProxy paymentProxy);
+
+    /**
+     * Transacciones INVALID del proveedor con {@code t_timestamp} desde {@code createdSince}.
+     * {@code t_timestamp} se fija al insertar la transacción, y solo lo cambian {@link #update} y
+     * {@link #updateDetailsById} (al cerrarla); invalidarla ({@link #invalidateForReservation}) solo
+     * cambia el estado. Para una transacción que nunca se cerró antes de invalidarse es, entonces, su
+     * creación.
+     */
+    @Query("select * from b_transaction where status = 'INVALID' and payment_proxy = :paymentProxy " +
+        "and t_timestamp >= :createdSince order by t_timestamp asc")
+    List<Transaction> findInvalidByPaymentProxyCreatedSince(@Bind("paymentProxy") PaymentProxy paymentProxy,
+                                                            @Bind("createdSince") ZonedDateTime createdSince);
+
+    /**
+     * Reemplaza la metadata de la transacción sin tocar su estado ni su {@code t_timestamp}.
+     */
+    @Query("update b_transaction set metadata = :metadata::jsonb where id = :id")
+    int updateMetadata(@Bind("id") int id, @Bind("metadata") @JSONData Map<String, String> metadata);
+
     @Query("update b_transaction set plat_fee = :platformFee, gtw_fee = :gatewayFee where gtw_tx_id = :transactionId and reservation_id = :reservationId")
     int updateFees(@Bind("transactionId") String transactionId,
                    @Bind("reservationId") String reservationId,

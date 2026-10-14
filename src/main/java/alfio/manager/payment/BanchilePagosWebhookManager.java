@@ -16,6 +16,7 @@
  */
 package alfio.manager.payment;
 
+import alfio.manager.NotificationManager;
 import alfio.manager.support.PaymentResult;
 import alfio.manager.support.PaymentWebhookResult;
 import alfio.manager.system.ConfigurationLevel;
@@ -24,6 +25,8 @@ import alfio.manager.system.ConfigurationManager.MaybeConfiguration;
 import alfio.model.PaymentInformation;
 import alfio.model.PurchaseContext;
 import alfio.model.TicketReservation;
+import alfio.model.TicketReservation.TicketReservationStatus;
+import alfio.model.TicketReservationStatusAndValidation;
 import alfio.model.system.ConfigurationKeys;
 import alfio.model.transaction.*;
 import alfio.model.transaction.banchile.BanchileWebhookPayload;
@@ -37,21 +40,26 @@ import alfio.model.transaction.capabilities.RefundRequest;
 import alfio.model.transaction.capabilities.WebhookHandler;
 import alfio.repository.TicketReservationRepository;
 import alfio.repository.TransactionRepository;
+import alfio.repository.user.OrganizationRepository;
 import alfio.util.ClockProvider;
 import alfio.util.Json;
 import alfio.util.MonetaryUtil;
+import alfio.util.RenderedTemplate;
 import lombok.AllArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.*;
 
 import static alfio.manager.payment.PaymentManagerUtils.invalidateExistingTransactions;
 import static alfio.model.TicketReservation.TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT;
+import static alfio.model.TicketReservation.TicketReservationStatus.STUCK;
 import static alfio.model.TicketReservation.TicketReservationStatus.WAITING_EXTERNAL_CONFIRMATION;
 import static alfio.model.system.ConfigurationKeys.*;
 
@@ -90,11 +98,98 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
         BANCHILE_BASE_URL
     );
 
+    /**
+     * Estados en que la reserva sigue esperando el resultado del pago en Banchile. Solo en estos
+     * estados {@link #forceTransactionCheck} aplica el resultado a la reserva.
+     */
+    private static final Set<TicketReservationStatus> RESERVATION_AWAITING_PAYMENT =
+        EnumSet.of(EXTERNAL_PROCESSING_PAYMENT, WAITING_EXTERNAL_CONFIRMATION, STUCK);
+
+    /**
+     * Reserva confirmada en alf.io, o con la confirmación en curso: FINALIZING y OFFLINE_FINALIZING
+     * son etapas intermedias que el finalizador lleva a COMPLETE (o reintenta si falla). En las
+     * alertas cuentan igual que COMPLETE.
+     */
+    private static final Set<TicketReservationStatus> RESERVATION_CONFIRMED = EnumSet.of(
+        TicketReservationStatus.COMPLETE, TicketReservationStatus.FINALIZING, TicketReservationStatus.OFFLINE_FINALIZING);
+
+    /**
+     * Reservas que la limpieza automática de alf.io borra, junto con todas sus transacciones, cuando
+     * vence su validez: las PENDING ({@code TicketReservationManager#cleanupExpiredReservations}) y las
+     * OFFLINE_PAYMENT, si la anulación automática del evento está activa
+     * ({@code TicketReservationManager#cleanupExpiredOfflineReservations}).
+     */
+    private static final Set<TicketReservationStatus> RESERVATION_REMOVED_BY_CLEANUP = EnumSet.of(
+        TicketReservationStatus.PENDING, TicketReservationStatus.OFFLINE_PAYMENT);
+
+    private static final String REFUNDED = "REFUNDED";
+
+    private static final String APPROVED_PAYMENT_ALERT = "pago aprobado en Banchile para una reserva que no está activa: "
+        + "verificar y reembolsar desde el portal de Banchile si corresponde";
+
+    /**
+     * Reserva no confirmada con el pago que Banchile informa como reembolsado: ya se devolvió, así
+     * que no hay nada que reembolsar. La detección del reembolso no está verificada contra una
+     * respuesta real de Banchile (ver {@link #isRefunded}): por eso se pide confirmarlo en el portal.
+     */
+    private static final String REFUNDED_PAYMENT_ALERT = "pago reembolsado en Banchile para una reserva que no está confirmada "
+        + "en alf.io: alf.io no aplicó el pago a la reserva y Banchile informa que ya se devolvió, así que no hay que "
+        + "reembolsarlo. Verificar en el portal de Banchile que la devolución esté hecha";
+
+    /**
+     * Reserva confirmada en alf.io con el pago rechazado en Banchile: el incidente BDD21987 (29-ago),
+     * una reserva confirmada a mano sin pago por la que se emitió la boleta SII 16104.
+     */
+    private static final String REJECTED_PAYMENT_ALERT = "pago rechazado en Banchile para una reserva confirmada en alf.io: "
+        + "puede haber entradas y boleta emitidas sin pago. Revisar la reserva y, si corresponde, anular las entradas "
+        + "y emitir la nota de crédito";
+
+    /** Reserva confirmada en alf.io con el pago que Banchile informa como reembolsado. */
+    private static final String REFUNDED_ON_CONFIRMED_RESERVATION_ALERT = "pago reembolsado en Banchile para una reserva "
+        + "confirmada en alf.io: la reserva sigue confirmada aunque el pago se devolvió, así que puede haber entradas y "
+        + "boleta emitidas sin pago. Revisar la reserva y, si corresponde, anular las entradas y emitir la nota de crédito";
+
+    /**
+     * Una alerta sobre una reserva confirmada puede venir de una sola sesión: el comprador pudo haber
+     * pagado en otra (apretó "Pagar" dos veces) o por otro medio, y anular sus entradas sería un error.
+     */
+    private static final String VERIFY_BEFORE_ANNULLING = "Importante: verificar que no se haya pagado en otra sesión o por "
+        + "otro medio antes de anular.";
+
+    /**
+     * Sesión que alf.io dejó INVALID al crear otra para la misma reserva (el comprador apretó "Pagar"
+     * de nuevo) y que se pagó igual: Banchile no la cancela y se puede pagar hasta que vence.
+     */
+    private static final String INVALIDATED_SESSION_ALERT = "pago aprobado en una sesión Banchile invalidada: posible doble "
+        + "cobro; verificar y reembolsar desde el portal si corresponde";
+
+    private static final String CLEANUP_NOTE = " Si la reserva estaba vencida, alf.io puede eliminarla, junto con su "
+        + "transacción, en su limpieza automática.";
+
+    /**
+     * Clave de la metadata con que se marca una sesión invalidada ya revisada en Banchile, para no
+     * volver a consultarla ni a alertar: {@code alerted} (pago aprobado o reembolsado) o
+     * {@code rejected}.
+     */
+    public static final String INVALIDATED_SESSION_REVIEW = "banchile_invalidated_session_review";
+
+    /**
+     * Cuánto tiempo después de su creación se sigue revisando una sesión invalidada: una sesión de
+     * Banchile se puede pagar durante 30 minutos ({@link #doPayment} fija ese vencimiento) y el cron
+     * corre cada 12. Con 90 minutos se ve un pago hecho en el último minuto de la sesión aunque se
+     * pierdan varios runs del cron (un reinicio, un run atrasado).
+     */
+    public static final Duration INVALIDATED_SESSION_WINDOW = Duration.ofMinutes(90);
+
+    private static final String NOT_REPORTED = "no informado";
+
     private final ConfigurationManager configurationManager;
     private final BanchilePagosClient banchilePagosClient;
     private final TransactionRepository transactionRepository;
     private final TicketReservationRepository ticketReservationRepository;
     private final ClockProvider clockProvider;
+    private final NotificationManager notificationManager;
+    private final OrganizationRepository organizationRepository;
 
     // -------------------------------------------------------------------------
     // PaymentProvider — metadata del proxy
@@ -169,9 +264,7 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
             // Construir el cuerpo de la request
             Auth auth = BanchilePagosClient.buildAuth(login, tranKey);
-            // Banchile rechaza UUIDs con dashes ("reference" inválido). Strip dashes para mantener
-            // solo 32 chars hex — sigue siendo único y mapeable de vuelta al reservationId completo.
-            String reference = reservationId.replace("-", "");
+            String reference = merchantReference(reservationId);
             String description = "Reserva " + reference;
             String currency = purchaseContext.getCurrency();
             long totalCents = spec.getPriceWithVAT();
@@ -430,12 +523,37 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
     /**
      * Fuerza la re-verificación del estado del pago consultando directamente a Banchile.
-     * Usado por el scheduler de Alfio para reconciliar reservas en limbo.
      *
-     * <p>En estados finales (COMPLETE/FAILED) persiste el metadata banchile_* con
-     * todos los detalles de la transacción (auth, internalReference, etc.) — mismo
-     * comportamiento que processWebhook. Esto cubre el caso polling cuando el webhook
-     * entrante no llegó (común en sandbox sin panel de comercio).
+     * <p>Todo lo que consulta el estado de un pago Banchile pasa por acá, vía
+     * {@code TicketReservationManager#forceTransactionCheck}: el cron de conciliación de 12
+     * minutos, el polling del navegador, el botón "verificar pago" y los jobs de alf.io que
+     * revisan pagos pendientes. Por eso la regla de qué hacer con la reserva vive en este método:
+     * <ul>
+     *   <li>Banchile sin estado final (PENDING, APPROVED_PARTIAL o desconocido): no cambia nada.</li>
+     *   <li>Estado final y reserva esperando el pago (EXTERNAL_PROCESSING_PAYMENT,
+     *       WAITING_EXTERNAL_CONFIRMATION o STUCK): persiste el estado en la transacción y devuelve
+     *       SUCCESSFUL o FAILED, para que alf.io complete la reserva o corra el flujo de pago fallido.
+     *       Antes de devolver FAILED revisa en Banchile las sesiones invalidadas de la reserva, que
+     *       ese flujo puede borrar con la reserva (ver
+     *       {@link #reviewInvalidatedSessionsBeforeTheFailedPaymentFlow}).</li>
+     *   <li>Estado final y reserva que no espera el pago (CANCELLED, COMPLETE, PENDING u otro), o
+     *       pago aprobado que Banchile informa como reembolsado: no toca la reserva. Cierra la
+     *       transacción (APPROVED → COMPLETE, REJECTED → FAILED) para que deje de consultarse y
+     *       manda una alerta a la organización del evento si el pago vino aprobado y la reserva no
+     *       está confirmada (o el pago fue reembolsado), o si el pago vino rechazado y la reserva está
+     *       confirmada (se confirmó sin cobro). Confirmada es COMPLETE o una confirmación en curso
+     *       (FINALIZING, OFFLINE_FINALIZING). Devuelve NOT_RELEVANT.</li>
+     * </ul>
+     *
+     * <p>En estados finales persiste el metadata banchile_* con todos los detalles de la
+     * transacción (auth, internalReference, etc.) — mismo comportamiento que processWebhook.
+     *
+     * @param reservation    reserva de la transacción; su estado se relee de la BD porque el
+     *                       objeto recibido puede estar desactualizado
+     * @param transaction    transacción BANCHILE en PENDING, ya bloqueada por el llamador
+     * @param paymentContext contexto de compra de la reserva
+     * @return SUCCESSFUL o FAILED si el resultado se aplica a la reserva, NOT_RELEVANT si no hay
+     *         que tocarla, ERROR si no se pudo obtener el estado de Banchile
      */
     @Override
     public PaymentWebhookResult forceTransactionCheck(TicketReservation reservation,
@@ -457,44 +575,497 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             }
 
             String banchileStatus = remoteSession.status().status();
-            Transaction.Status alfioStatus = mapStatus(banchileStatus);
-
-            // Persistir metadata en estados finales (incluso cuando se llega vía polling y
-            // no por webhook). En PENDING se preserva el metadata existente.
-            if (alfioStatus == Transaction.Status.COMPLETE || alfioStatus == Transaction.Status.FAILED) {
-                // Construir un payload sintético para reusar el helper de metadata.
-                // El payload del webhook no está disponible en este path (es polling), así que
-                // se usan los datos que SÍ tenemos: requestId del transaction y status remoto.
-                var syntheticPayload = new alfio.model.transaction.banchile.BanchileWebhookPayload(
-                    requestId,
-                    null,                              // reference: no disponible en este path
-                    remoteSession.status(),
-                    null                               // signature: no aplica (no es un webhook entrante)
-                );
-                Map<String, String> metadata = buildBanchileMetadata(transaction, syntheticPayload, remoteSession, banchileStatus);
-                String requestIdStr = String.valueOf(requestId);
-                java.time.ZonedDateTime now = purchaseContext.now(clockProvider);
-                transactionRepository.update(
-                    transaction.getId(),
-                    requestIdStr, requestIdStr,
-                    now,
-                    transaction.getPlatformFee(), transaction.getGatewayFee(),
-                    alfioStatus,
-                    metadata
-                );
-                log.info("forceTransactionCheck Banchile {} — reserva={} requestId={}",
-                    alfioStatus, reservation.getId(), requestIdStr);
+            boolean refunded = isRefunded(remoteSession);
+            // un pago reembolsado fue aprobado antes: la transacción se cierra como COMPLETE, igual
+            // que en alf.io, donde un reembolso no cambia el estado de la transacción
+            Transaction.Status alfioStatus = refunded ? Transaction.Status.COMPLETE : mapStatus(banchileStatus);
+            if (alfioStatus != Transaction.Status.COMPLETE && alfioStatus != Transaction.Status.FAILED) {
+                // sin estado final: se preserva la transacción tal cual hasta la próxima consulta
+                return PaymentWebhookResult.notRelevant(banchileStatus);
             }
 
-            return switch (alfioStatus) {
-                case COMPLETE -> PaymentWebhookResult.successful(new BanchilePaymentToken(transaction.getPaymentId()));
-                case FAILED   -> PaymentWebhookResult.failed(banchileStatus);
-                default       -> PaymentWebhookResult.notRelevant(banchileStatus);
-            };
+            String reservationId = transaction.getReservationId();
+            String requestIdStr = String.valueOf(requestId);
+            TicketReservationStatus reservationStatus = ticketReservationRepository.findOptionalStatusAndValidationById(reservationId)
+                .map(TicketReservationStatusAndValidation::getStatus)
+                .orElse(null);
+            boolean awaitingPayment = !refunded && RESERVATION_AWAITING_PAYMENT.contains(reservationStatus);
+            boolean confirmed = RESERVATION_CONFIRMED.contains(reservationStatus);
+
+            if (awaitingPayment && alfioStatus == Transaction.Status.FAILED) {
+                // el flujo de pago fallido puede borrar la reserva con todas sus transacciones: antes se
+                // revisan sus sesiones invalidadas. Va antes de cerrar la transacción, como las alertas:
+                // si Banchile no responde por alguna, la transacción sigue PENDING y el rechazo se
+                // vuelve a procesar en la próxima consulta
+                reviewInvalidatedSessionsBeforeTheFailedPaymentFlow(transaction, banchileStatus, purchaseContext);
+            }
+
+            // las alertas van antes de cerrar la transacción: si el correo falla, la transacción
+            // sigue PENDING y la alerta se reintenta en la próxima consulta
+            if (!awaitingPayment && alfioStatus == Transaction.Status.COMPLETE && (refunded || !confirmed)) {
+                sendApprovedPaymentAlert(purchaseContext, transaction, remoteSession, banchileStatus, reservationStatus, refunded);
+            } else if (alfioStatus == Transaction.Status.FAILED && confirmed) {
+                // REJECTED (o PARTIAL_EXPIRED, que mapStatus trata igual) con la reserva confirmada:
+                // se confirmó sin que Banchile cobrara
+                sendRejectedPaymentAlert(purchaseContext, transaction, remoteSession, banchileStatus, reservationStatus);
+            }
+            closeTransaction(transaction, requestId, remoteSession, banchileStatus, alfioStatus, purchaseContext);
+
+            if (awaitingPayment) {
+                log.info("forceTransactionCheck Banchile {} — reserva={} requestId={}",
+                    alfioStatus, reservationId, requestIdStr);
+                return alfioStatus == Transaction.Status.COMPLETE
+                    ? PaymentWebhookResult.successful(new BanchilePaymentToken(transaction.getPaymentId()))
+                    : PaymentWebhookResult.failed(banchileStatus);
+            }
+
+            log.warn("forceTransactionCheck Banchile {} (reembolsado={}) para la reserva {} en estado {}: "
+                    + "se cierra la transacción como {} sin modificar la reserva — requestId={}",
+                banchileStatus, refunded, reservationId, reservationStatus, alfioStatus, requestIdStr);
+            return PaymentWebhookResult.notRelevant(refunded ? "refunded" : "reservation_not_awaiting_payment");
         } catch (Exception e) {
             log.warn("Error en forceTransactionCheck para reserva {}", reservation.getId(), e);
             return PaymentWebhookResult.error(e.getMessage());
         }
+    }
+
+    /**
+     * Persiste en la transacción el estado final informado por Banchile, con el metadata banchile_*.
+     *
+     * @param transaction     transacción a cerrar
+     * @param requestId       requestId de la sesión Banchile
+     * @param remoteSession   respuesta de querySession (ground truth remoto)
+     * @param banchileStatus  estado de la sesión en Banchile
+     * @param alfioStatus     estado final para alf.io (COMPLETE o FAILED)
+     * @param purchaseContext contexto de compra, para la fecha en su zona horaria
+     */
+    private void closeTransaction(Transaction transaction,
+                                  int requestId,
+                                  SessionResponse remoteSession,
+                                  String banchileStatus,
+                                  Transaction.Status alfioStatus,
+                                  PurchaseContext purchaseContext) {
+        Map<String, String> metadata = buildBanchileMetadata(transaction, syntheticPayload(requestId, remoteSession),
+            remoteSession, banchileStatus);
+        String requestIdStr = String.valueOf(requestId);
+        transactionRepository.update(
+            transaction.getId(),
+            requestIdStr, requestIdStr,
+            purchaseContext.now(clockProvider),
+            transaction.getPlatformFee(), transaction.getGatewayFee(),
+            alfioStatus,
+            metadata
+        );
+    }
+
+    /**
+     * Resultado de {@link #reviewInvalidatedSession}.
+     */
+    public enum InvalidatedSessionReview {
+        /** Banchile informa el pago aprobado o reembolsado: se alertó a la organización y la sesión quedó marcada. */
+        ALERTED,
+        /** Banchile informa la sesión rechazada: quedó marcada como revisada, sin alerta. */
+        REJECTED,
+        /**
+         * Banchile no informa un estado final: no cambia nada y se vuelve a consultar en el próximo
+         * run, salvo que sea su última revisión (entonces queda un WARN en el log).
+         */
+        NOT_FINAL,
+        /** La sesión ya estaba marcada como revisada: no se consultó. */
+        ALREADY_REVIEWED
+    }
+
+    /**
+     * Revisa en Banchile una sesión cuya transacción alf.io dejó INVALID al crear otra sesión para la
+     * misma reserva (el comprador apretó "Pagar" de nuevo, o eligió otro medio de pago). alf.io no
+     * cancela esa sesión en Banchile: se puede pagar hasta que vence, y nada más la consulta.
+     * <ul>
+     *   <li>APPROVED o reembolsado: alerta de posible doble cobro a la organización del evento y
+     *       marca la sesión como alertada.</li>
+     *   <li>REJECTED (o PARTIAL_EXPIRED): la marca como revisada, sin alerta.</li>
+     *   <li>Sin estado final (PENDING, APPROVED_PARTIAL o desconocido): no cambia nada. Si es la
+     *       última revisión dentro de la ventana, deja un WARN en el log: nadie la volverá a consultar.</li>
+     * </ul>
+     *
+     * <p>No toca la reserva ni el estado INVALID de la transacción: solo escribe en su metadata la
+     * marca de revisión y los detalles banchile_* del pago. La alerta se encola en la transacción de
+     * base de datos del llamador, antes que la marca: quedan las dos o ninguna, y si algo falla la
+     * sesión sigue sin marcar y se reintenta en el próximo run.
+     *
+     * @param transaction           transacción BANCHILE en INVALID, ya bloqueada ({@code FOR UPDATE}) por el llamador
+     * @param purchaseContext       contexto de compra de la reserva
+     * @param lastReviewInTheWindow true si el próximo run ya no la revisa porque sale de
+     *                              {@link #INVALIDATED_SESSION_WINDOW}
+     * @return el resultado de la revisión
+     * @throws BanchilePagosClient.BanchilePagosException si Banchile no responde a tiempo o responde con error
+     */
+    public InvalidatedSessionReview reviewInvalidatedSession(Transaction transaction, PurchaseContext purchaseContext,
+                                                             boolean lastReviewInTheWindow) {
+        return reviewInvalidatedSession(transaction, purchaseContext, null, lastReviewInTheWindow
+            ? "sale de la ventana de revisión de " + INVALIDATED_SESSION_WINDOW.toMinutes() + " minutos: alf.io no la volverá a consultar"
+            : null);
+    }
+
+    /**
+     * Sesión vigente de la reserva que Banchile informó rechazada: la revisión de las sesiones
+     * invalidadas que se hace antes del flujo de pago fallido la menciona en la alerta.
+     *
+     * @param requestId      requestId de la sesión vigente
+     * @param banchileStatus estado de la sesión vigente en Banchile (REJECTED o PARTIAL_EXPIRED)
+     */
+    private record RejectedSession(String requestId, String banchileStatus) {}
+
+    /**
+     * Antes de devolver FAILED con la reserva esperando el pago: revisa en Banchile, como
+     * {@link #reviewInvalidatedSession}, las sesiones de la misma reserva que alf.io dejó INVALID y
+     * todavía no tienen un resultado final. El flujo de pago fallido de alf.io anula la reserva si
+     * está vencida, y la limpieza la borra si vuelve a PENDING y vence: en los dos casos se borran
+     * todas sus transacciones, también las de esas sesiones, y el cron ya no las ve.
+     *
+     * <p>Cada sesión se bloquea con {@code FOR UPDATE} después de la transacción PENDING, que el
+     * llamador ya tiene bloqueada: el orden de siempre, PENDING y después INVALID. Si Banchile no
+     * responde por alguna, la excepción se propaga y {@link #forceTransactionCheck} devuelve ERROR
+     * sin cerrar la transacción vigente: el rechazo se vuelve a procesar en la próxima consulta.
+     *
+     * @param rejected        transacción PENDING de la sesión vigente, que Banchile informa rechazada
+     * @param rejectedStatus  estado de la sesión vigente en Banchile
+     * @param purchaseContext contexto de compra de la reserva
+     */
+    private void reviewInvalidatedSessionsBeforeTheFailedPaymentFlow(Transaction rejected,
+                                                                     String rejectedStatus,
+                                                                     PurchaseContext purchaseContext) {
+        // la misma ventana que el cron (BanchileReconciliationJob), medida desde la creación de la sesión
+        var createdSince = ZonedDateTime.now(clockProvider.getClock()).minus(INVALIDATED_SESSION_WINDOW);
+        var sessions = transactionRepository.findAllByReservationIdAndPaymentProxy(rejected.getReservationId(), PaymentProxy.BANCHILE).stream()
+            .filter(tx -> tx.getStatus() == Transaction.Status.INVALID)
+            .filter(tx -> !tx.getTimestamp().isBefore(createdSince))
+            .filter(tx -> !isInvalidatedSessionReviewed(tx))
+            .toList();
+        var rejectedSession = new RejectedSession(rejected.getPaymentId(), rejectedStatus);
+        // si sigue sin estado final, puede ser su última revisión: con la reserva vencida, el flujo de
+        // pago fallido borra su transacción
+        String lastReviewReason = "se revisó al procesar el rechazo de la sesión vigente requestId=" + rejected.getPaymentId()
+            + ": si la reserva está vencida, el flujo de pago fallido la anula y borra esta transacción, y alf.io no la volverá a consultar";
+        for (var session : sessions) {
+            transactionRepository.loadOptionalByIdAndStatusForUpdate(session.getId(), Transaction.Status.INVALID)
+                .ifPresent(locked -> reviewInvalidatedSession(locked, purchaseContext, rejectedSession, lastReviewReason));
+        }
+    }
+
+    /**
+     * {@link #reviewInvalidatedSession(Transaction, PurchaseContext, boolean)}, con la sesión vigente
+     * rechazada cuando la revisión se hace antes del flujo de pago fallido.
+     *
+     * @param rejectedSession  sesión vigente que Banchile informó rechazada, o null si revisa el cron
+     * @param lastReviewReason por qué puede ser la última revisión de la sesión, para el WARN si
+     *                         Banchile no informa un estado final; null si habrá otras
+     */
+    private InvalidatedSessionReview reviewInvalidatedSession(Transaction transaction, PurchaseContext purchaseContext,
+                                                              RejectedSession rejectedSession, String lastReviewReason) {
+        if (isInvalidatedSessionReviewed(transaction)) {
+            return InvalidatedSessionReview.ALREADY_REVIEWED;
+        }
+        var configuration = getConfiguration(purchaseContext.getConfigurationLevel());
+        String login   = configuration.get(BANCHILE_LOGIN).getRequiredValue();
+        String tranKey = configuration.get(BANCHILE_TRANKEY).getRequiredValue();
+        String baseUrl = configuration.get(BANCHILE_BASE_URL).getRequiredValue();
+
+        int requestId = Integer.parseInt(transaction.getPaymentId());
+        Auth freshAuth = BanchilePagosClient.buildAuth(login, tranKey);
+        SessionResponse remoteSession = banchilePagosClient.querySession(requestId, freshAuth, baseUrl);
+        if (remoteSession == null || remoteSession.status() == null) {
+            log.warn("querySession devolvió una respuesta inválida para la sesión invalidada requestId={}", requestId);
+            return InvalidatedSessionReview.NOT_FINAL;
+        }
+        String banchileStatus = remoteSession.status().status();
+        boolean refunded = isRefunded(remoteSession);
+        Transaction.Status outcome = refunded ? Transaction.Status.COMPLETE : mapStatus(banchileStatus);
+        if (outcome != Transaction.Status.COMPLETE && outcome != Transaction.Status.FAILED) {
+            if (lastReviewReason != null) {
+                log.warn("Sesión Banchile invalidada requestId={} de la reserva {}: Banchile no informa un estado final ({}) y {}. "
+                    + "Revisarla en el portal de Banchile", requestId, transaction.getReservationId(), banchileStatus, lastReviewReason);
+            }
+            return InvalidatedSessionReview.NOT_FINAL;
+        }
+
+        boolean paid = outcome == Transaction.Status.COMPLETE;
+        if (paid) {
+            sendInvalidatedSessionAlert(purchaseContext, transaction, remoteSession, banchileStatus, refunded, rejectedSession);
+        }
+        Map<String, String> metadata = buildBanchileMetadata(transaction, syntheticPayload(requestId, remoteSession),
+            remoteSession, banchileStatus);
+        metadata.put(INVALIDATED_SESSION_REVIEW, paid ? "alerted" : "rejected");
+        transactionRepository.updateMetadata(transaction.getId(), metadata);
+        log.info("Sesión Banchile invalidada requestId={} de la reserva {}: {} en Banchile (reembolsado={})",
+            requestId, transaction.getReservationId(), banchileStatus, refunded);
+        return paid ? InvalidatedSessionReview.ALERTED : InvalidatedSessionReview.REJECTED;
+    }
+
+    /**
+     * true si la sesión invalidada ya se revisó en Banchile con un resultado final (alertada o
+     * rechazada): no hay que volver a consultarla.
+     *
+     * @param transaction transacción BANCHILE en INVALID
+     * @return true si su metadata tiene la marca de revisión
+     */
+    public static boolean isInvalidatedSessionReviewed(Transaction transaction) {
+        return transaction.getMetadata().containsKey(INVALIDATED_SESSION_REVIEW);
+    }
+
+    /**
+     * Avisa a la organización del evento de un pago aprobado en Banchile que no se aplicó a la
+     * reserva, porque la reserva no esperaba el pago o porque Banchile informa el pago como
+     * reembolsado. Correo en texto plano, como la alerta de reservas STUCK. Son tres alertas:
+     * <ul>
+     *   <li>pago aprobado y reserva no confirmada: hay que reembolsarlo si corresponde;</li>
+     *   <li>pago reembolsado y reserva no confirmada: ya se devolvió, no hay nada que reembolsar;</li>
+     *   <li>pago reembolsado y reserva confirmada (solo se llega acá así con la reserva confirmada):
+     *       la reserva quedó confirmada sin pago.</li>
+     * </ul>
+     *
+     * @param purchaseContext   evento de la reserva
+     * @param transaction       transacción Banchile (todavía PENDING)
+     * @param remoteSession     respuesta de querySession
+     * @param banchileStatus    estado de la sesión en Banchile
+     * @param reservationStatus estado actual de la reserva, o null si no existe
+     * @param refunded          true si Banchile informa el pago como reembolsado
+     */
+    private void sendApprovedPaymentAlert(PurchaseContext purchaseContext,
+                                          Transaction transaction,
+                                          SessionResponse remoteSession,
+                                          String banchileStatus,
+                                          TicketReservationStatus reservationStatus,
+                                          boolean refunded) {
+        boolean confirmed = RESERVATION_CONFIRMED.contains(reservationStatus);
+        String sentence;
+        String subject;
+        if (confirmed) {
+            sentence = REFUNDED_ON_CONFIRMED_RESERVATION_ALERT + "\n" + VERIFY_BEFORE_ANNULLING;
+            subject = "Banchile: pago reembolsado en una reserva confirmada";
+        } else if (refunded) {
+            sentence = REFUNDED_PAYMENT_ALERT;
+            subject = "Banchile: pago reembolsado en una reserva no confirmada";
+        } else {
+            sentence = APPROVED_PAYMENT_ALERT;
+            subject = "Banchile: pago aprobado en una reserva que no está activa";
+        }
+        var payment = selectPaymentDetails(remoteSession);
+        var text = alertHeader(sentence, purchaseContext, transaction, payment, reservationStatus);
+        appendPaymentDetails(text, payment, banchileStatus);
+        if (confirmed) {
+            text.append("\nBanchile informa este pago como reembolsado y la reserva sigue confirmada en alf.io.\n");
+        }
+        text.append("\nEsta revisión cerró la transacción como COMPLETE y no modificó la reserva.");
+        appendCleanupNote(text, reservationStatus);
+
+        subject += " (requestId " + transaction.getPaymentId() + ")";
+        String recipient = sendAlert(purchaseContext, transaction, subject, text.toString());
+        log.warn("Alerta enviada a {}: pago Banchile aprobado (requestId={}, reembolsado={}) en la reserva {} en estado {}",
+            recipient, transaction.getPaymentId(), refunded, transaction.getReservationId(), reservationStatus);
+    }
+
+    /**
+     * Avisa a la organización del evento de un pago que Banchile informa como rechazado en una
+     * reserva que alf.io tiene confirmada: se confirmó sin cobro, por ejemplo a mano (incidente
+     * BDD21987), así que puede haber entradas y boleta emitidas sin pago. La reserva no se toca:
+     * anular las entradas y emitir la nota de crédito lo decide la organización, después de
+     * descartar que se haya pagado en otra sesión o por otro medio.
+     *
+     * @param purchaseContext   evento de la reserva
+     * @param transaction       transacción Banchile (todavía PENDING)
+     * @param remoteSession     respuesta de querySession
+     * @param banchileStatus    estado de la sesión en Banchile
+     * @param reservationStatus estado actual de la reserva (COMPLETE, FINALIZING u OFFLINE_FINALIZING)
+     */
+    private void sendRejectedPaymentAlert(PurchaseContext purchaseContext,
+                                          Transaction transaction,
+                                          SessionResponse remoteSession,
+                                          String banchileStatus,
+                                          TicketReservationStatus reservationStatus) {
+        var status = remoteSession.status();
+        var text = alertHeader(REJECTED_PAYMENT_ALERT + "\n" + VERIFY_BEFORE_ANNULLING, purchaseContext, transaction,
+                selectPaymentDetails(remoteSession), reservationStatus)
+            .append("Estado en Banchile: ").append(banchileStatus).append('\n')
+            .append("Razón Banchile: ").append(status.reason() != null ? status.reason() : NOT_REPORTED).append('\n')
+            .append("Mensaje Banchile: ").append(status.message() != null ? status.message() : NOT_REPORTED).append('\n')
+            .append("\nEsta revisión cerró la transacción como FAILED y no modificó la reserva.\n");
+
+        String subject = "Banchile: pago rechazado en una reserva confirmada (requestId " + transaction.getPaymentId() + ")";
+        String recipient = sendAlert(purchaseContext, transaction, subject, text.toString());
+        log.warn("Alerta enviada a {}: pago Banchile {} (requestId={}) en la reserva confirmada {} ({})",
+            recipient, banchileStatus, transaction.getPaymentId(), transaction.getReservationId(), reservationStatus);
+    }
+
+    /**
+     * Avisa a la organización del evento de un pago aprobado (o reembolsado) en una sesión que alf.io
+     * dejó INVALID al crear otra para la misma reserva: el comprador pudo haber pagado dos veces. Las
+     * demás sesiones de la reserva, con su estado, van en la lista del encabezado, para compararlas
+     * en el portal.
+     *
+     * @param purchaseContext evento de la reserva
+     * @param transaction     transacción INVALID de la sesión pagada
+     * @param remoteSession   respuesta de querySession
+     * @param banchileStatus  estado de la sesión en Banchile
+     * @param refunded        true si Banchile informa el pago como reembolsado
+     * @param rejectedSession sesión vigente que Banchile informó rechazada, si la revisión se hace
+     *                        antes del flujo de pago fallido; null si revisa el cron
+     */
+    private void sendInvalidatedSessionAlert(PurchaseContext purchaseContext,
+                                             Transaction transaction,
+                                             SessionResponse remoteSession,
+                                             String banchileStatus,
+                                             boolean refunded,
+                                             RejectedSession rejectedSession) {
+        String reservationId = transaction.getReservationId();
+        TicketReservationStatus reservationStatus = ticketReservationRepository.findOptionalStatusAndValidationById(reservationId)
+            .map(TicketReservationStatusAndValidation::getStatus)
+            .orElse(null);
+        var payment = selectPaymentDetails(remoteSession);
+        var text = alertHeader(INVALIDATED_SESSION_ALERT, purchaseContext, transaction, payment, reservationStatus);
+        appendPaymentDetails(text, payment, banchileStatus);
+        if (refunded) {
+            text.append("\nBanchile informa este pago como reembolsado: ya se devolvió, así que no hay que reembolsarlo.\n");
+        }
+        if (rejectedSession != null) {
+            text.append("\nSe revisó al procesar el rechazo de la sesión vigente de la reserva (requestId ")
+                .append(rejectedSession.requestId()).append(", ").append(rejectedSession.banchileStatus()).append(" en Banchile): ")
+                .append("a continuación alf.io corre su flujo de pago fallido, que anula la reserva si está vencida y borra todas sus ")
+                .append("transacciones, también la de esta sesión; si la reserva sigue vigente, la devuelve a PENDING y la limpieza ")
+                .append("automática la borra si vence sin otro pago. Este correo puede quedar como el único registro del pago.\n");
+        }
+        text.append("\nEsta revisión no modificó la reserva ni la transacción de esta sesión, que sigue INVALID, y no ")
+            .append("volverá a consultarla.");
+        appendCleanupNote(text, reservationStatus);
+
+        String subject = "Banchile: pago aprobado en una sesión invalidada (requestId " + transaction.getPaymentId() + ")";
+        String recipient = sendAlert(purchaseContext, transaction, subject, text.toString());
+        log.warn("Alerta enviada a {}: pago Banchile {} (requestId={}, reembolsado={}) en una sesión invalidada de la reserva {} en estado {}",
+            recipient, banchileStatus, transaction.getPaymentId(), refunded, reservationId, reservationStatus);
+    }
+
+    /**
+     * Encabezado común de las alertas: la frase que explica qué revisar y los datos para ubicar el
+     * pago en alf.io y en el portal de Banchile, con el comprador, el medio de pago de la reserva, la
+     * referencia con que se buscan todas sus sesiones y sus otras transacciones Banchile. Si la
+     * reserva se borra después (la limpieza automática, el flujo de pago fallido), el correo queda
+     * como el único registro de quién pagó.
+     *
+     * @param sentence          frase inicial de la alerta
+     * @param purchaseContext   evento de la reserva
+     * @param transaction       transacción Banchile
+     * @param payment           intento de pago elegido por {@link #selectPaymentDetails}, o null
+     * @param reservationStatus estado actual de la reserva, o null si no existe
+     * @return el texto, para agregarle las líneas propias de cada alerta
+     */
+    private StringBuilder alertHeader(String sentence,
+                                      PurchaseContext purchaseContext,
+                                      Transaction transaction,
+                                      SessionResponse.PaymentDetails payment,
+                                      TicketReservationStatus reservationStatus) {
+        String reservationId = transaction.getReservationId();
+        // el ID con el que se reembolsa por /api/reverse (banchile_internal_reference en el metadata)
+        String internalReference = payment != null && payment.internalReference() != null
+            ? String.valueOf(payment.internalReference()) : NOT_REPORTED;
+        String amount = MonetaryUtil.formatCents(transaction.getPriceInCents(), transaction.getCurrency())
+            + " " + transaction.getCurrency();
+        var reservation = ticketReservationRepository.findOptionalReservationById(reservationId);
+        // la reserva confirmada a mano queda con ADMIN; la que no se confirmó nunca, sin medio de pago
+        String paymentMethod = reservation
+            .map(TicketReservation::getPaymentMethod)
+            .map(Enum::name)
+            .orElse(NOT_REPORTED);
+        String buyerName = reservation.map(TicketReservation::getFullName).filter(StringUtils::isNotBlank).orElse(NOT_REPORTED);
+        String buyerEmail = reservation.map(TicketReservation::getEmail).filter(StringUtils::isNotBlank).orElse(NOT_REPORTED);
+        var text = new StringBuilder()
+            .append(sentence).append("\n\n")
+            .append("Evento: ").append(purchaseContext.getDisplayName()).append('\n')
+            .append("Reserva: ").append(reservationId).append('\n')
+            .append("Comprador: ").append(buyerName).append('\n')
+            .append("Correo del comprador: ").append(buyerEmail).append('\n')
+            .append("Estado de la reserva en alf.io: ").append(reservationStatus != null ? reservationStatus : "no encontrada").append('\n')
+            .append("Medio de pago de la reserva en alf.io: ").append(paymentMethod).append('\n')
+            .append("Referencia del comercio en Banchile: ").append(merchantReference(reservationId))
+            .append(" (con ella se buscan en el portal todas las sesiones de la reserva)\n")
+            .append("requestId Banchile: ").append(transaction.getPaymentId()).append('\n')
+            .append("internalReference Banchile: ").append(internalReference).append('\n')
+            .append("Monto: ").append(amount).append('\n');
+        var others = transactionRepository.findAllByReservationIdAndPaymentProxy(reservationId, PaymentProxy.BANCHILE).stream()
+            .filter(tx -> tx.getId() != transaction.getId())
+            .toList();
+        if (others.isEmpty()) {
+            text.append("Otras transacciones Banchile de la reserva: ninguna\n");
+        } else {
+            text.append("Otras transacciones Banchile de la reserva:\n");
+            for (var other : others) {
+                String banchileStatus = other.getMetadata().get("banchile_status");
+                text.append("- requestId ").append(other.getPaymentId()).append(": ").append(other.getStatus())
+                    .append(banchileStatus != null ? " (Banchile: " + banchileStatus + ")" : "").append('\n');
+            }
+        }
+        return text;
+    }
+
+    /**
+     * Agrega el recibo, la autorización y el estado de la sesión en Banchile.
+     */
+    private static void appendPaymentDetails(StringBuilder text, SessionResponse.PaymentDetails payment, String banchileStatus) {
+        String receipt = payment != null && payment.receipt() != null ? payment.receipt() : NOT_REPORTED;
+        String authorization = payment != null && payment.authorization() != null ? payment.authorization() : "no informada";
+        text.append("Recibo: ").append(receipt).append('\n')
+            .append("Autorización: ").append(authorization).append('\n')
+            .append("Estado en Banchile: ").append(banchileStatus).append('\n');
+    }
+
+    /**
+     * Cierra el párrafo final de la alerta. Si la limpieza automática de alf.io puede borrar la
+     * reserva (PENDING u OFFLINE_PAYMENT vencida), avisa que el correo puede quedar como el único
+     * registro del pago; a las demás reservas la limpieza no las toca.
+     */
+    private static void appendCleanupNote(StringBuilder text, TicketReservationStatus reservationStatus) {
+        if (RESERVATION_REMOVED_BY_CLEANUP.contains(reservationStatus)) {
+            text.append(CLEANUP_NOTE);
+        }
+        text.append('\n');
+    }
+
+    /**
+     * Referencia del comercio que alf.io manda a Banchile en createSession: el ID de la reserva sin
+     * guiones. Banchile rechaza la referencia con guiones; sin ellos sigue siendo única y se puede
+     * llevar de vuelta al ID de la reserva. Con ella se buscan en el portal todas las sesiones de la
+     * reserva.
+     */
+    private static String merchantReference(String reservationId) {
+        return reservationId.replace("-", "");
+    }
+
+    /**
+     * Payload sintético para reusar {@link #buildBanchileMetadata} cuando se llega por polling y no
+     * por webhook: se usan los datos que sí hay, el requestId de la transacción y el estado remoto.
+     */
+    private static BanchileWebhookPayload syntheticPayload(int requestId, SessionResponse remoteSession) {
+        return new BanchileWebhookPayload(
+            requestId,
+            null,                              // reference: no disponible en este path
+            remoteSession.status(),
+            null                               // signature: no aplica (no es un webhook entrante)
+        );
+    }
+
+    /**
+     * Encola la alerta en texto plano para el correo de la organización del evento, como la
+     * alerta de reservas STUCK.
+     *
+     * @param purchaseContext evento de la reserva
+     * @param transaction     transacción Banchile
+     * @param subject         asunto del correo
+     * @param body            texto del correo
+     * @return el destinatario
+     */
+    private String sendAlert(PurchaseContext purchaseContext, Transaction transaction, String subject, String body) {
+        String recipient = organizationRepository.getById(purchaseContext.getOrganizationId()).getEmail();
+        notificationManager.sendSimpleEmail(purchaseContext, transaction.getReservationId(), recipient, subject,
+            () -> RenderedTemplate.plaintext(body, Map.of()));
+        return recipient;
     }
 
     /**
@@ -609,13 +1180,73 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     // -------------------------------------------------------------------------
 
     /**
+     * true si Banchile informa que el pago aprobado fue reembolsado: la sesión en estado
+     * REFUNDED, o la sesión APPROVED con algún intento de pago reembolsado.
+     *
+     * <p>Qué está verificado contra Banchile y qué no:
+     * <ul>
+     *   <li>Verificado con la respuesta real de querySession de un pago aprobado y no reembolsado
+     *       (rq 34028): cada elemento de {@code payment[]} trae las claves amount, authorization,
+     *       franchise, internalReference, issuerName, paymentMethod, paymentMethodName,
+     *       processorFields, receipt, reference, refunded y status; {@code refunded} es un booleano
+     *       ({@code false}) y {@code status.status} es "APPROVED". {@code amount} viene como
+     *       {@code {"from": {"total", "currency"}, "to": {"total", "currency"}, "factor"}}.</li>
+     *   <li>No verificado: no hay una muestra real de un pago reembolsado. Las dos formas que se
+     *       aceptan acá ({@code refunded == true} en un intento, o estado REFUNDED en la sesión o en
+     *       un intento) no se han visto en una respuesta de Banchile; si un reembolso llegara de
+     *       otra forma, se trataría como un pago aprobado.</li>
+     * </ul>
+     *
+     * @param remoteSession respuesta de querySession
+     * @return true si el pago fue reembolsado en Banchile
+     */
+    private static boolean isRefunded(SessionResponse remoteSession) {
+        String sessionStatus = remoteSession.status() != null ? remoteSession.status().status() : null;
+        if (REFUNDED.equals(sessionStatus)) {
+            return true;
+        }
+        return "APPROVED".equals(sessionStatus)
+            && remoteSession.payment() != null
+            && remoteSession.payment().stream().anyMatch(BanchilePagosWebhookManager::isRefundedPayment);
+    }
+
+    private static boolean isRefundedPayment(SessionResponse.PaymentDetails payment) {
+        return payment != null
+            && (Boolean.TRUE.equals(payment.refunded())
+                || (payment.status() != null && REFUNDED.equals(payment.status().status())));
+    }
+
+    /**
+     * Intento de pago del que se toman los detalles (recibo, autorización, medio de pago...).
+     * Una sesión puede tener varios intentos (reintentos tras un rechazo): se prefiere el
+     * APPROVED; si no hay, el reembolsado (Banchile puede informarlo con estado REFUNDED en vez
+     * de APPROVED); si tampoco hay, el primero disponible (útil para rechazos).
+     *
+     * @param remoteSession respuesta de querySession, puede ser null
+     * @return el intento elegido, o null si la sesión no tiene intentos de pago
+     */
+    private static SessionResponse.PaymentDetails selectPaymentDetails(SessionResponse remoteSession) {
+        if (remoteSession == null || remoteSession.payment() == null || remoteSession.payment().isEmpty()) {
+            return null;
+        }
+        var approved = remoteSession.firstApprovedPayment();
+        if (approved != null) {
+            return approved;
+        }
+        return remoteSession.payment().stream()
+            .filter(BanchilePagosWebhookManager::isRefundedPayment)
+            .findFirst()
+            .orElse(remoteSession.payment().get(0));
+    }
+
+    /**
      * Construye el {@code metadata Map<String,String>} que se persiste en
      * {@code b_transaction.metadata} (columna jsonb) con prefijo {@code banchile_*}.
      *
      * <p>Preserva todo metadata previamente persistido en {@link Transaction#getMetadata()}
      * y agrega los campos extraídos del payload del webhook + la respuesta de
-     * {@code querySession} (ground truth remoto). Si el primer {@code PaymentDetails}
-     * APPROVED no existe (rechazo), cae al primer intento de pago disponible.
+     * {@code querySession} (ground truth remoto). Los detalles del pago salen del intento que
+     * elige {@link #selectPaymentDetails}: el APPROVED, si no el reembolsado, si no el primero.
      *
      * <p>Solo invocar en estados finales (COMPLETE / FAILED). En PENDING, preservar
      * intacto el metadata actual.
@@ -651,14 +1282,7 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             if (st.message() != null) metadata.put("banchile_status_message", st.message());
         }
 
-        // PaymentDetails: preferir el APPROVED, sino caer al primero disponible (útil para rechazos)
-        SessionResponse.PaymentDetails pd = null;
-        if (remoteSession != null) {
-            pd = remoteSession.firstApprovedPayment();
-            if (pd == null && remoteSession.payment() != null && !remoteSession.payment().isEmpty()) {
-                pd = remoteSession.payment().get(0);
-            }
-        }
+        SessionResponse.PaymentDetails pd = selectPaymentDetails(remoteSession);
         if (pd != null) {
             if (pd.internalReference() != null)
                 metadata.put("banchile_internal_reference", String.valueOf(pd.internalReference()));

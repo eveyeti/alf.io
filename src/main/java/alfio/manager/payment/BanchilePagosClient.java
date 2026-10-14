@@ -25,20 +25,26 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
-import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -67,10 +73,35 @@ public class BanchilePagosClient {
     private static final String SESSION_PATH = "/api/session";
     private static final int NONCE_BYTES = 16;
 
-    private final HttpClient httpClient;
+    /**
+     * Tope de cada llamada a Banchile. El scheduler de Spring tiene un solo hilo: una llamada
+     * sin tope que se cuelga detiene todos los jobs (correos, expiración de reservas, stuck-check).
+     */
+    private static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofSeconds(20);
 
+    private final HttpClient httpClient;
+    private final Duration requestTimeout;
+
+    /**
+     * Cliente con el tope por defecto ({@link #DEFAULT_REQUEST_TIMEOUT}, 20 segundos) para cada llamada.
+     *
+     * @param httpClient HttpClient compartido de la aplicación
+     */
+    @Autowired
     public BanchilePagosClient(HttpClient httpClient) {
+        this(httpClient, DEFAULT_REQUEST_TIMEOUT);
+    }
+
+    /**
+     * Cliente con un tope explícito para cada llamada: cubre la conexión, el envío y la lectura
+     * completa de la respuesta.
+     *
+     * @param httpClient     HttpClient a usar
+     * @param requestTimeout tiempo máximo que puede tardar cada llamada a Banchile
+     */
+    public BanchilePagosClient(HttpClient httpClient, Duration requestTimeout) {
         this.httpClient = httpClient;
+        this.requestTimeout = Objects.requireNonNull(requestTimeout);
     }
 
     // -------------------------------------------------------------------------
@@ -141,6 +172,7 @@ public class BanchilePagosClient {
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(HttpUtils.CONTENT_TYPE, HttpUtils.APPLICATION_JSON)
+            .timeout(requestTimeout)
             .POST(HttpRequest.BodyPublishers.ofString(body, UTF_8))
             .build();
 
@@ -164,6 +196,7 @@ public class BanchilePagosClient {
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(HttpUtils.CONTENT_TYPE, HttpUtils.APPLICATION_JSON)
+            .timeout(requestTimeout)
             .POST(HttpRequest.BodyPublishers.ofString(body, UTF_8))
             .build();
 
@@ -192,6 +225,7 @@ public class BanchilePagosClient {
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create(url))
             .header(HttpUtils.CONTENT_TYPE, HttpUtils.APPLICATION_JSON)
+            .timeout(requestTimeout)
             .POST(HttpRequest.BodyPublishers.ofString(body, UTF_8))
             .build();
 
@@ -211,47 +245,70 @@ public class BanchilePagosClient {
      * @return SessionResponse deserializado desde el JSON de respuesta
      */
     private SessionResponse execute(HttpRequest request, String operation) {
-        try {
-            HttpResponse<java.io.InputStream> response =
-                httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-
-            if (HttpUtils.callSuccessful(response)) {
-                try (var reader = new InputStreamReader(response.body(), UTF_8)) {
-                    SessionResponse parsed = Json.GSON.fromJson(reader, SessionResponse.class);
-                    log.debug("{} ← HTTP {} | status={}", operation, response.statusCode(),
-                        parsed.status() != null ? parsed.status().status() : "null");
-                    return parsed;
-                }
-            } else {
-                // Intentar leer el cuerpo de error para el mensaje
-                String errorBody = readErrorBody(response);
-                log.warn("{} ← HTTP {} error | body={}", operation, response.statusCode(), errorBody);
-                throw new BanchilePagosException(
-                    "Banchile Pagos devolvió HTTP " + response.statusCode()
-                        + " en " + operation + ": " + errorBody,
-                    response.statusCode()
-                );
-            }
-        } catch (BanchilePagosException e) {
-            throw e;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new BanchilePagosException("Request interrumpida en " + operation, e);
-        } catch (IOException e) {
-            throw new BanchilePagosException("Error de I/O en " + operation, e);
+        HttpResponse<String> response = sendWithinTimeout(request, operation);
+        if (HttpUtils.callSuccessful(response)) {
+            SessionResponse parsed = Json.GSON.fromJson(response.body(), SessionResponse.class);
+            log.debug("{} ← HTTP {} | status={}", operation, response.statusCode(),
+                parsed != null && parsed.status() != null ? parsed.status().status() : "null");
+            return parsed;
         }
+        // Intentar leer el cuerpo de error para el mensaje
+        String errorBody = readErrorBody(response.body());
+        log.warn("{} ← HTTP {} error | body={}", operation, response.statusCode(), errorBody);
+        throw new BanchilePagosException(
+            "Banchile Pagos devolvió HTTP " + response.statusCode()
+                + " en " + operation + ": " + errorBody,
+            response.statusCode()
+        );
     }
 
     /**
-     * Lee el cuerpo de una respuesta de error como String, extrayendo el mensaje de Banchile
+     * Envía la request y espera la respuesta completa (headers y cuerpo) como máximo
+     * {@code requestTimeout}. El {@code .timeout()} de la request no acota un cuerpo trabado:
+     * por eso se usa {@code sendAsync(...).get(N)}, que sí acota la llamada entera.
+     *
+     * @param request   Request HTTP pre-construida
+     * @param operation Nombre de la operación para logging
+     * @return la respuesta con el cuerpo ya leído
+     * @throws BanchilePagosException si Banchile no responde a tiempo, si hay un error de
+     *                                comunicación o si el hilo es interrumpido
+     */
+    private HttpResponse<String> sendWithinTimeout(HttpRequest request, String operation) {
+        CompletableFuture<HttpResponse<String>> future =
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString(UTF_8));
+        try {
+            return future.get(requestTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            // aborta el intercambio HTTP: sin esto la conexión queda esperando el resto de la respuesta
+            future.cancel(true);
+            throw new BanchilePagosException(timeoutMessage(operation), e);
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new BanchilePagosException("Request interrumpida en " + operation, e);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof HttpTimeoutException) {
+                // venció el .timeout() de la request antes que el get(N): también es un timeout
+                throw new BanchilePagosException(timeoutMessage(operation), e.getCause());
+            }
+            throw new BanchilePagosException("Error de I/O en " + operation, e.getCause());
+        }
+    }
+
+    private String timeoutMessage(String operation) {
+        return "Banchile Pagos no respondió dentro de " + requestTimeout.toMillis() + " ms en " + operation;
+    }
+
+    /**
+     * Lee el cuerpo de una respuesta de error, extrayendo el mensaje de Banchile
      * si el JSON tiene el campo {@code status.message}.
      *
-     * @param response Respuesta HTTP con error
+     * @param body Cuerpo de la respuesta HTTP con error
      * @return Mensaje de error legible
      */
-    private String readErrorBody(HttpResponse<java.io.InputStream> response) {
-        try (var reader = new InputStreamReader(response.body(), UTF_8)) {
-            JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
+    private String readErrorBody(String body) {
+        try {
+            JsonObject json = JsonParser.parseString(body).getAsJsonObject();
             if (json.has("status")) {
                 JsonObject status = json.getAsJsonObject("status");
                 if (status.has("message")) {

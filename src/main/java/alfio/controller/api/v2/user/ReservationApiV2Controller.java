@@ -32,6 +32,7 @@ import alfio.controller.support.CustomBindingResult;
 import alfio.controller.support.TemplateProcessor;
 import alfio.manager.*;
 import alfio.manager.i18n.MessageSourceManager;
+import alfio.manager.payment.PaymentCheckSingleFlight;
 import alfio.manager.payment.PaymentSpecification;
 import alfio.manager.payment.StripeCreditCardManager;
 import alfio.manager.support.AdditionalServiceHelper;
@@ -115,6 +116,7 @@ public class ReservationApiV2Controller {
     private final AdditionalServiceHelper additionalServiceHelper;
     private final PurchaseContextFieldManager purchaseContextFieldManager;
     private final TransactionRepository transactionRepository;
+    private final PaymentCheckSingleFlight paymentCheckSingleFlight;
 
     /**
      * Note: now it will return for any states of the reservation.
@@ -279,11 +281,34 @@ public class ReservationApiV2Controller {
         // estado en milisegundos, sin esperar al scheduler global.
         // Filter por transacción Banchile PENDING (no por reservation.payment_method, que
         // queda NULL hasta que la reserva se confirma).
+        // Una sola consulta a Banchile por pago a la vez, y a lo sumo 5 en total: el frontend no
+        // espera la respuesta anterior y cada consulta espera el lock de la transacción con una
+        // conexión tomada. Con una consulta en curso para el pago, o sin cupo, el poll responde con
+        // el estado actual de la reserva.
         transactionRepository.loadOptionalByReservationIdAndStatus(reservationId, Transaction.Status.PENDING)
             .filter(tx -> tx.getPaymentProxy() == PaymentProxy.BANCHILE)
-            .flatMap(tx -> ticketReservationManager.findById(reservationId)
-                .flatMap(r -> purchaseContextManager.findByReservationId(reservationId)
-                    .map(pc -> Pair.of(pc, r))))
+            .ifPresent(tx -> {
+                if (!paymentCheckSingleFlight.runIfIdle(tx.getId(), () -> forceBanchileTransactionCheck(reservationId))) {
+                    log.debug("[banchile-poll] reservation={} sin consultar a Banchile (consulta en curso para el pago o sin cupo): "
+                        + "se responde con el estado actual", reservationId);
+                }
+            });
+
+        Optional<ReservationStatusInfo> res = ticketReservationRepository.findOptionalStatusAndValidationById(reservationId)
+            .map(status -> new ReservationStatusInfo(status.getStatus(), Boolean.TRUE.equals(status.getValidated())));
+        return res.map(ResponseEntity::ok).orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    /**
+     * Consulta a Banchile el pago de la reserva y aplica el resultado, vía
+     * {@link TicketReservationManager#forceTransactionCheck}.
+     *
+     * @param reservationId reserva con una transacción Banchile PENDING
+     */
+    private void forceBanchileTransactionCheck(String reservationId) {
+        ticketReservationManager.findById(reservationId)
+            .flatMap(r -> purchaseContextManager.findByReservationId(reservationId)
+                .map(pc -> Pair.of(pc, r)))
             .ifPresent(pair -> {
                 log.info("[banchile-poll] dispatching forceTransactionCheck for reservation={} status={}",
                     reservationId, pair.getRight().getStatus());
@@ -291,10 +316,6 @@ public class ReservationApiV2Controller {
                 log.info("[banchile-poll] forceTransactionCheck result={}",
                     result.map(Object::toString).orElse("empty"));
             });
-
-        Optional<ReservationStatusInfo> res = ticketReservationRepository.findOptionalStatusAndValidationById(reservationId)
-            .map(status -> new ReservationStatusInfo(status.getStatus(), Boolean.TRUE.equals(status.getValidated())));
-        return res.map(ResponseEntity::ok).orElseGet(() -> ResponseEntity.notFound().build());
     }
 
 

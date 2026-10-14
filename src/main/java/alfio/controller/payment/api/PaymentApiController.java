@@ -19,11 +19,14 @@ package alfio.controller.payment.api;
 import alfio.manager.PaymentManager;
 import alfio.manager.PurchaseContextManager;
 import alfio.manager.TicketReservationManager;
+import alfio.manager.payment.PaymentCheckSingleFlight;
 import alfio.manager.support.PaymentResult;
 import alfio.model.PurchaseContext;
 import alfio.model.TicketReservation;
 import alfio.model.transaction.PaymentMethod;
+import alfio.model.transaction.Transaction;
 import alfio.model.transaction.TransactionInitializationToken;
+import alfio.repository.TransactionRepository;
 import lombok.AllArgsConstructor;
 import org.apache.commons.lang3.tuple.Pair;
 import org.springframework.http.ResponseEntity;
@@ -39,6 +42,8 @@ public class PaymentApiController {
     private final PaymentManager paymentManager;
     private final TicketReservationManager ticketReservationManager;
     private final PurchaseContextManager purchaseContextManager;
+    private final TransactionRepository transactionRepository;
+    private final PaymentCheckSingleFlight paymentCheckSingleFlight;
 
     @PostMapping({"/api/reservation/{reservationId}/payment/{method}/init",
         "/api/events/{eventName}/reservation/{reservationId}/payment/{method}/init" //<-deprecated
@@ -87,7 +92,18 @@ public class PaymentApiController {
         "/api/v2/public/event/{eventName}/reservation/{reservationId}/transaction/force-check" //<-deprecated
     })
     public ResponseEntity<PaymentResult> forceCheckStatus(@PathVariable String reservationId) {
-        return ResponseEntity.of(getEventReservationPair(reservationId)
-            .flatMap(pair -> ticketReservationManager.forceTransactionCheck(pair.getLeft(), pair.getRight())));
+        var pendingTransaction = transactionRepository.loadOptionalByReservationIdAndStatus(reservationId, Transaction.Status.PENDING);
+        if (pendingTransaction.isEmpty()) {
+            // sin transacción PENDING no hay nada que verificar: 404, el mismo resultado que da forceTransactionCheck
+            return ResponseEntity.notFound().build();
+        }
+        // una sola verificación por pago a la vez, y a lo sumo 5 en total, compartidas con el polling
+        // de /status: con otra en curso para el pago, o sin cupo, se responde "pendiente" sin esperar
+        // el lock de la transacción ni tomar una conexión
+        var transaction = pendingTransaction.get();
+        return ResponseEntity.of(paymentCheckSingleFlight.callIfIdle(transaction.getId(),
+            () -> getEventReservationPair(reservationId)
+                .flatMap(pair -> ticketReservationManager.forceTransactionCheck(pair.getLeft(), pair.getRight())),
+            () -> Optional.of(PaymentResult.pending(transaction.getPaymentId()))));
     }
 }
