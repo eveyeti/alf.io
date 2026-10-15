@@ -67,6 +67,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.util.AopTestUtils;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -78,6 +80,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 import static alfio.model.TicketReservation.TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT;
@@ -239,28 +242,32 @@ class BanchileSessionIntegrationTest {
     // -------------------------------------------------------------------------
 
     /**
-     * Al crear la sesión, la reserva queda vigente hasta 15 minutos después de que vence la sesión
-     * (nunca menos que antes), en la misma transacción que la deja en EXTERNAL_PROCESSING_PAYMENT.
+     * Al crear la sesión, la reserva que vencía a los 25 minutos queda vigente hasta 15 minutos
+     * después de que vence la sesión, en la misma transacción que la deja en EXTERNAL_PROCESSING_PAYMENT.
+     * Corre con la hora real (ver {@link #withTheRealClock}), así que lo comprueba a cualquier hora.
      */
     @Test
     void payingFromTheOverviewExtendsTheReservationUntilFifteenMinutesAfterTheSession() throws Exception {
         var event = createEvent();
         var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
-        var validityBefore = ticketReservationRepository.findReservationById(reservationId).getValidity();
         banchileCreatesTheSession(51002);
+        var before = Instant.now();
 
-        MockMvcBuilders.standaloneSetup(reservationApiV2Controller).build()
+        withTheRealClock(() -> MockMvcBuilders.standaloneSetup(reservationApiV2Controller).build()
             .perform(post("/api/v2/public/reservation/{reservationId}", reservationId)
                 .param("lang", "en")
                 .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
                 .content(PAY_WITH_BANCHILE))
-            .andExpect(status().isOk());
+            .andExpect(status().isOk()));
 
+        var after = Instant.now();
         assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationStatus(reservationId));
         var sessionExpiration = Instant.parse(lastCreateSessionBody().get("expiration").getAsString());
-        var extended = Date.from(sessionExpiration.plus(Duration.ofMinutes(15)));
-        var expected = extended.after(validityBefore) ? extended : validityBefore;
-        assertEquals(expected.toInstant(), validity(reservationId).toInstant());
+        assertFalse(sessionExpiration.isBefore(before.plus(Duration.ofMinutes(30)).truncatedTo(ChronoUnit.MILLIS)),
+            "la sesión vence 30 minutos después de apretar \"Pagar\": " + sessionExpiration);
+        assertFalse(sessionExpiration.isAfter(after.plus(Duration.ofMinutes(30))), "la sesión vence 30 minutos después: " + sessionExpiration);
+        assertEquals(Date.from(sessionExpiration.plus(Duration.ofMinutes(15))).toInstant(), validity(reservationId).toInstant(),
+            "la reserva vence 15 minutos después de la sesión");
     }
 
     /**
@@ -497,6 +504,33 @@ class BanchileSessionIntegrationTest {
         assertTrue(managerAtPayTime.doPayment(paymentSpecification(event, reservationId)).isRedirect(),
             "doPayment debía redirigir a Banchile");
         assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationStatus(reservationId));
+    }
+
+    /** Un paso de test que puede lanzar excepciones (MockMvc las declara). */
+    private interface TestStep {
+        void run() throws Exception;
+    }
+
+    /**
+     * Corre {@code step} con el {@link BanchilePagosWebhookManager} de Spring usando la hora real, y
+     * después le devuelve su reloj. El reloj de los tests está fijo en las 10:00 UTC de hoy y
+     * confirmOverview compara la validez con la hora real: con el reloj fijo, la sesión vence a las
+     * 10:30 UTC, y después de las 10:20 UTC (07:20 en Chile) una reserva recién creada ya vence más tarde
+     * que la sesión + 15 minutos, así que no se vería la extensión. {@code ClockProvider} guarda el
+     * reloj en un estático que se fija una sola vez: por eso se cambia solo el de este bean.
+     */
+    private void withTheRealClock(TestStep step) throws Exception {
+        Object manager = AopTestUtils.getUltimateTargetObject(banchilePagosWebhookManager);
+        Object fixedClock = ReflectionTestUtils.getField(manager, "clockProvider");
+        var realClock = mock(ClockProvider.class);
+        when(realClock.getClock()).thenReturn(Clock.systemUTC());
+        when(realClock.withZone(any())).thenAnswer(invocation -> Clock.system(invocation.getArgument(0)));
+        ReflectionTestUtils.setField(manager, "clockProvider", realClock);
+        try {
+            step.run();
+        } finally {
+            ReflectionTestUtils.setField(manager, "clockProvider", fixedClock);
+        }
     }
 
     /** El cron de conciliación de 12 minutos, ejecutado a mano. */
