@@ -41,6 +41,7 @@ import alfio.model.modification.TicketCategoryModification;
 import alfio.model.modification.TicketReservationModification;
 import alfio.model.modification.TicketReservationWithOptionalCodeModification;
 import alfio.model.transaction.Transaction;
+import alfio.model.transaction.PaymentProxy;
 import alfio.repository.EventRepository;
 import alfio.repository.TicketCategoryRepository;
 import alfio.repository.TicketRepository;
@@ -92,6 +93,7 @@ import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 
 /**
  * La sesión que alf.io crea en Banchile cuando el comprador aprieta "Pagar", y qué pasa con la
@@ -338,6 +340,107 @@ class BanchileSessionIntegrationTest {
 
         assertEquals(validityBefore.toInstant(), validity(reservationId).toInstant());
         assertEquals(PENDING, reservationStatus(reservationId));
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests del revisor (rama revision-v5-local)
+    // -------------------------------------------------------------------------
+
+    /**
+     * El reintento de verdad: después del flujo de pago fallido la reserva vuelve a PENDING, y el
+     * comprador, desde el link del correo, aprieta "Pagar" de nuevo. alf.io crea otra sesión: la
+     * transacción vieja (FAILED) queda INVALID, la nueva PENDING, la reserva en
+     * EXTERNAL_PROCESSING_PAYMENT y su validez vuelve a ser la de la sesión nueva + 15 minutos.
+     */
+    @Test
+    void reviewerTheBuyerPaysAgainFromTheOverviewAfterTheFailedPaymentFlow() throws Exception {
+        var event = createEvent();
+        var now = Instant.now();
+        var reservationId = reservationOf(event, Date.from(now.minus(Duration.ofMinutes(22))));
+        payWithBanchileAt(event, reservationId, 53001, now.minus(Duration.ofMinutes(42)));
+        banchileResponds(53001, rejected(53001, "EX", "La petición ha expirado"));
+        cron().reconcilePendingBanchileTransactions();
+        assertTheBuyerCanRetry(event, reservationId);
+
+        var validityBeforePayingAgain = validity(reservationId);
+        banchileCreatesTheSession(53002);
+        MockMvcBuilders.standaloneSetup(reservationApiV2Controller).build()
+            .perform(post("/api/v2/public/reservation/{reservationId}", reservationId)
+                .param("lang", "en")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content(PAY_WITH_BANCHILE))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.value.redirectUrl").value("https://checkout.banchilepagos.cl/spa/session/53002/abc"));
+
+        assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationStatus(reservationId));
+        var statusByRequestId = new HashMap<String, Transaction.Status>();
+        transactionRepository.findAllByReservationIdAndPaymentProxy(reservationId, PaymentProxy.BANCHILE)
+            .forEach(tx -> statusByRequestId.put(tx.getPaymentId(), tx.getStatus()));
+        assertEquals(Map.of("53001", Transaction.Status.INVALID, "53002", Transaction.Status.PENDING), statusByRequestId);
+        // el reloj de los tests está fijo en las 10:00 UTC: la validez esperada es max(antes, sesión + 15)
+        var sessionExpiration = Instant.parse(lastCreateSessionBody().get("expiration").getAsString());
+        var extended = Date.from(sessionExpiration.plus(Duration.ofMinutes(15)));
+        var expected = extended.after(validityBeforePayingAgain) ? extended : validityBeforePayingAgain;
+        assertEquals(expected.toInstant(), validity(reservationId).toInstant());
+    }
+
+    /**
+     * Con una validez más larga que la sesión + 15 minutos (por ejemplo, alargada por el admin) la
+     * reserva la conserva y el comprador va a Banchile igual: ejercita el log que usa la validez leída
+     * de la base de datos.
+     */
+    @Test
+    void reviewerALongerValidityIsKeptAndTheBuyerStillGoesToBanchile() throws Exception {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addDays(new Date(), 2));
+        var validityBefore = validity(reservationId);
+        banchileCreatesTheSession(53003);
+
+        MockMvcBuilders.standaloneSetup(reservationApiV2Controller).build()
+            .perform(post("/api/v2/public/reservation/{reservationId}", reservationId)
+                .param("lang", "en")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content(PAY_WITH_BANCHILE))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.value.redirectUrl").value("https://checkout.banchilepagos.cl/spa/session/53003/abc"));
+
+        assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationStatus(reservationId));
+        assertEquals(validityBefore.toInstant(), validity(reservationId).toInstant());
+    }
+
+    /**
+     * Con la primera sesión todavía abierta, "Pagar" de nuevo (otra pestaña) crea otra sesión: la
+     * primera queda INVALID (pagable en Banchile hasta que vence) y la validez pasa a max(validez,
+     * sesión nueva + 15). En producción, con el reloj real, cada "Pagar" vuelve a alargarla: apretando
+     * "Pagar" antes de que venza, la reserva no vence nunca (el mismo patrón de Mollie y Saferpay).
+     */
+    @Test
+    void reviewerPayingAgainWhileTheFirstSessionIsOpenCreatesASecondSession() throws Exception {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        var mvc = MockMvcBuilders.standaloneSetup(reservationApiV2Controller).build();
+
+        banchileCreatesTheSession(53004);
+        mvc.perform(post("/api/v2/public/reservation/{reservationId}", reservationId)
+                .param("lang", "en").contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(PAY_WITH_BANCHILE))
+            .andExpect(status().isOk());
+        var firstValidity = validity(reservationId);
+
+        // la reserva sigue en EXTERNAL_PROCESSING_PAYMENT y confirmOverview no mira el estado
+        banchileCreatesTheSession(53005);
+        mvc.perform(post("/api/v2/public/reservation/{reservationId}", reservationId)
+                .param("lang", "en").contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(PAY_WITH_BANCHILE))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.value.redirectUrl").value("https://checkout.banchilepagos.cl/spa/session/53005/abc"));
+
+        var sessionExpiration = Instant.parse(lastCreateSessionBody().get("expiration").getAsString());
+        var extended = Date.from(sessionExpiration.plus(Duration.ofMinutes(15)));
+        var expected = extended.after(firstValidity) ? extended : firstValidity;
+        assertEquals(expected.toInstant(), validity(reservationId).toInstant());
+        var statusByRequestId = new HashMap<String, Transaction.Status>();
+        transactionRepository.findAllByReservationIdAndPaymentProxy(reservationId, PaymentProxy.BANCHILE)
+            .forEach(tx -> statusByRequestId.put(tx.getPaymentId(), tx.getStatus()));
+        assertEquals(Map.of("53004", Transaction.Status.INVALID, "53005", Transaction.Status.PENDING), statusByRequestId);
     }
 
     // -------------------------------------------------------------------------

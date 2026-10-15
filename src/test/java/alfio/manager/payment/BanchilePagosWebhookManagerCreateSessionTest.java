@@ -486,6 +486,59 @@ class BanchilePagosWebhookManagerCreateSessionTest {
     }
 
     // -------------------------------------------------------------------------
+    // Tests del revisor (rama revision-v5-local): matan mutaciones que sobrevivían
+    // -------------------------------------------------------------------------
+
+    /**
+     * Un emoji justo en el carácter 255 del user-agent no se parte: queda entero o no queda, nunca
+     * un sustituto suelto (mata la mutación que corta por unidades UTF-16).
+     */
+    @Test
+    void reviewerUserAgentCutDoesNotSplitAnEmojiAtTheLimit() {
+        onRequestFrom("203.0.113.7", "x".repeat(254) + "😀" + "cola");
+
+        var userAgent = createSession().userAgent();
+
+        assertEquals("x".repeat(254) + "😀", userAgent);
+        assertEquals(255, userAgent.codePointCount(0, userAgent.length()));
+        for (int i = 0; i < userAgent.length(); i++) {
+            char c = userAgent.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                assertTrue(i + 1 < userAgent.length() && Character.isLowSurrogate(userAgent.charAt(i + 1)), "sustituto suelto en " + i);
+                i++;
+            } else {
+                assertFalse(Character.isLowSurrogate(c), "sustituto suelto en " + i);
+            }
+        }
+    }
+
+    /**
+     * Las IPv6 más largas (8 grupos de 4 dígitos, 39 caracteres; o con IPv4 embebida, 45) también
+     * llegan a Banchile (mata la mutación que baja el tope de 45).
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"2800:0150:011e:1a2b:0000:0000:0000:0007", "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255"})
+    void reviewerSendsTheLongestIpv6(String ip) {
+        onRequestFrom("[" + ip + "]", IPHONE_SAFARI);
+
+        assertEquals(ip, createSession().ipAddress());
+    }
+
+    /**
+     * Un nombre de 71 letras sin espacios se corta en exactamente 60 (el test original corta justo
+     * antes de un espacio, así que no distingue 60 de 61).
+     */
+    @Test
+    void reviewerBuyerNameIsCutAtExactlySixtyCharacters() {
+        when(reservation.getFirstName()).thenReturn("A" + "a".repeat(70));
+
+        var buyer = createSession().buyer();
+
+        assertNotNull(buyer);
+        assertEquals("A" + "a".repeat(59), buyer.name());
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
