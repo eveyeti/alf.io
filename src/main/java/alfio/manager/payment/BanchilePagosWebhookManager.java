@@ -56,8 +56,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
@@ -1288,17 +1290,77 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     /**
      * IP del comprador para la sesión. Con {@code server.forward-headers-strategy=native}, Jetty
      * entrega en {@code getRemoteAddr()} la IP del {@code X-Forwarded-For} que pone Caddy (una IPv6,
-     * entre corchetes). Solo se acepta una IP literal, que se valida sin resolver nombres.
+     * entre corchetes). Solo se acepta una IP literal, que se valida sin resolver nombres, y pública:
+     * una IP privada, de loopback, de enlace local o de CGNAT no es la del comprador (en producción
+     * los clientes IPv6 llegan como 172.x por el userland-proxy de Docker).
      *
      * @param request request del comprador, o null
-     * @return la IP sin corchetes, o {@value #UNKNOWN_IP_ADDRESS} si no hay request o no es una IP
+     * @return la IP sin corchetes, o {@value #UNKNOWN_IP_ADDRESS} si no hay request, no es una IP o
+     *         no es pública
      */
     private static String clientIpAddress(HttpServletRequest request) {
         String address = request != null ? StringUtils.strip(request.getRemoteAddr()) : null;
         if (address != null && address.length() > 1 && address.startsWith("[") && address.endsWith("]")) {
             address = address.substring(1, address.length() - 1);
         }
-        return isIpLiteral(address) ? address : UNKNOWN_IP_ADDRESS;
+        return isIpLiteral(address) && isPublicIpAddress(address) ? address : UNKNOWN_IP_ADDRESS;
+    }
+
+    /**
+     * true si la IP es pública. No son públicas las IPv4 de 0/8, 10/8, 100.64/10 (CGNAT), 127/8,
+     * 169.254/16, 172.16/12 y 192.168/16, ni las IPv6 {@code ::}, {@code ::1}, fc00::/7 y fe80::/10.
+     * Una IPv4 mapeada en IPv6 ({@code ::ffff:a.b.c.d}) se evalúa por la IPv4 de adentro.
+     *
+     * @param ipLiteral IP ya validada por {@link #isIpLiteral}: {@link InetAddress} la convierte sin
+     *                  consultar el DNS
+     */
+    private static boolean isPublicIpAddress(String ipLiteral) {
+        byte[] bytes;
+        try {
+            bytes = InetAddress.getByName(ipLiteral).getAddress();
+        } catch (UnknownHostException e) {
+            // no pasa con un literal ya validado; si pasara, no es una IP que se pueda mandar
+            return false;
+        }
+        if (bytes.length == 16 && isIpv4Mapped(bytes)) {
+            // Java ya devuelve estas como IPv4; por si no lo hiciera
+            bytes = Arrays.copyOfRange(bytes, 12, 16);
+        }
+        return bytes.length == 4 ? isPublicIpv4(bytes) : isPublicIpv6(bytes);
+    }
+
+    private static boolean isIpv4Mapped(byte[] ipv6) {
+        for (int i = 0; i < 10; i++) {
+            if (ipv6[i] != 0) {
+                return false;
+            }
+        }
+        return ipv6[10] == (byte) 0xff && ipv6[11] == (byte) 0xff;
+    }
+
+    private static boolean isPublicIpv4(byte[] ipv4) {
+        int first = ipv4[0] & 0xff;
+        int second = ipv4[1] & 0xff;
+        return first != 0                                   // 0.0.0.0/8
+            && first != 10                                  // 10.0.0.0/8
+            && !(first == 100 && (second & 0xc0) == 64)     // 100.64.0.0/10
+            && first != 127                                 // 127.0.0.0/8
+            && !(first == 169 && second == 254)             // 169.254.0.0/16
+            && !(first == 172 && (second & 0xf0) == 16)     // 172.16.0.0/12
+            && !(first == 192 && second == 168);            // 192.168.0.0/16
+    }
+
+    private static boolean isPublicIpv6(byte[] ipv6) {
+        boolean firstFifteenBytesAreZero = true;
+        for (int i = 0; i < 15; i++) {
+            firstFifteenBytesAreZero &= ipv6[i] == 0;
+        }
+        boolean unspecifiedOrLoopback = firstFifteenBytesAreZero && (ipv6[15] == 0 || ipv6[15] == 1);   // :: y ::1
+        int first = ipv6[0] & 0xff;
+        int second = ipv6[1] & 0xff;
+        return !unspecifiedOrLoopback
+            && (first & 0xfe) != 0xfc                       // fc00::/7
+            && !(first == 0xfe && (second & 0xc0) == 0x80); // fe80::/10
     }
 
     /**

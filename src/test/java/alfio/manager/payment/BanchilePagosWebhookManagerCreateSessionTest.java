@@ -269,6 +269,35 @@ class BanchilePagosWebhookManagerCreateSessionTest {
         assertEquals("0.0.0.0", createSession().ipAddress());
     }
 
+    /**
+     * Una IP que no es pública no es la del comprador: en producción los clientes IPv6 llegan como
+     * 172.x por el userland-proxy de Docker. Va la de siempre. Las IPv4 mapeadas en IPv6 se evalúan
+     * por la IPv4 de adentro.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"0.0.0.0", "0.1.2.3", "10.0.0.1", "10.255.255.255", "100.64.0.1", "100.127.255.254", "127.0.0.1",
+        "169.254.1.1", "172.16.0.1", "172.18.0.1", "172.31.255.255", "192.168.0.1", "192.168.255.255",
+        "[::]", "::", "[::1]", "::1", "[fc00::1]", "fd12:3456:789a::1", "[fe80::1]", "febf:ffff::1",
+        "[::ffff:10.0.0.1]", "::ffff:172.18.0.1", "::ffff:127.0.0.1", "0:0:0:0:0:ffff:192.168.1.1"})
+    void sendsTheCurrentIpWhenTheClientIpIsNotPublic(String remoteAddr) {
+        onRequestFrom(remoteAddr, IPHONE_SAFARI);
+
+        assertEquals("0.0.0.0", createSession().ipAddress());
+    }
+
+    /**
+     * Los bordes de esos rangos son públicos y se mandan.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"1.0.0.1", "9.255.255.255", "11.0.0.1", "100.63.255.255", "100.128.0.1", "126.255.255.255",
+        "128.0.0.1", "169.253.255.255", "169.255.0.1", "172.15.255.255", "172.32.0.1", "192.167.255.255", "192.169.0.1",
+        "190.98.210.4", "::2", "fbff:ffff::1", "fec0::1", "fe7f::1", "2800:150:11e:1a2b::7", "::ffff:190.98.210.4"})
+    void sendsTheClientIpWhenItIsPublic(String remoteAddr) {
+        onRequestFrom(remoteAddr, IPHONE_SAFARI);
+
+        assertEquals(remoteAddr, createSession().ipAddress());
+    }
+
     @Test
     void sendsTheCurrentIpAndUserAgentWithoutARequest() {
         var request = createSession();
