@@ -258,10 +258,18 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     private static final Pattern CONTROL_OR_SEPARATOR_RUNS = Pattern.compile("[\\p{Cc}\\p{Z}]+");
 
     /**
-     * Caracteres que no van en la descripción: Banchile admite alfanuméricos, acentuados y símbolos
-     * comunes, así que se descarta todo lo que no sea letra, dígito, espacio o uno de estos símbolos.
+     * Símbolos que van en la descripción, además de letras ASCII, dígitos y espacio. Salen de lo que
+     * el sandbox de Banchile aceptó el 15-oct-2026: rechaza con HTTP 400 {@code ¿ ? ¡ ! " * ° º ª { } ~ ^ ` \ ´ ¨},
+     * {@code ’ – — … € ™} y {@code õ â ê ô}. {@code $ = < > [ ] |} los acepta, pero se dejan fuera a
+     * propósito.
      */
-    private static final Pattern DESCRIPTION_DISCARDED_CHARACTERS = Pattern.compile("[^\\p{L}\\p{M}0-9 .,;:!?¡¿'\"()&/#%+*=@$_-]");
+    private static final String DESCRIPTION_SYMBOLS = ",.:;-_'()/#&%+@";
+
+    /**
+     * Letras con diacrítico que van en la descripción: las tildes del castellano, la ñ y la ü. Banchile
+     * también aceptó {@code à è ç ã}, pero no {@code õ â ê ô}: las demás pasan a su letra base.
+     */
+    private static final String DESCRIPTION_SPANISH_LETTERS = "áéíóúñüÁÉÍÓÚÑÜ";
 
     private final ConfigurationManager configurationManager;
     private final BanchilePagosClient banchilePagosClient;
@@ -1183,9 +1191,10 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
     /**
      * Descripción del pago en Banchile: {@code <nombre del evento> - reserva <ID corto>}, con el ID
-     * corto de los correos de alf.io, para reconocer el pago en el portal. Sin el nombre del evento
-     * queda {@code Reserva <ID corto>}, y sin ID corto la de antes, {@code Reserva <referencia>}.
-     * Siempre tiene más de 4 caracteres, el mínimo que acepta Banchile.
+     * corto de los correos de alf.io, para reconocer el pago en el portal. Lleva solo los caracteres
+     * que Banchile acepta (ver {@link #descriptionText}); el nombre del evento se corta para que el
+     * sufijo quepa. Si del nombre o del ID corto no queda nada, va la de antes,
+     * {@code Reserva <referencia>}.
      *
      * @param purchaseContext evento de la reserva
      * @param reservation     reserva, o null si no se encontró
@@ -1193,16 +1202,51 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * @return la descripción, de hasta {@value #MAX_DESCRIPTION_LENGTH} caracteres
      */
     private String paymentDescription(PurchaseContext purchaseContext, TicketReservation reservation, String reference) {
+        String previous = "Reserva " + reference;
         String shortId = reservation != null
-            ? StringUtils.trimToNull(configurationManager.getShortReservationID(purchaseContext, reservation))
-            : null;
-        if (shortId == null) {
-            return "Reserva " + reference;
+            ? descriptionText(configurationManager.getShortReservationID(purchaseContext, reservation))
+            : "";
+        if (shortId.isEmpty()) {
+            return previous;
         }
         String suffix = " - reserva " + shortId;
-        String eventName = singleLine(DESCRIPTION_DISCARDED_CHARACTERS.matcher(singleLine(purchaseContext.getDisplayName())).replaceAll(""));
-        eventName = cut(eventName, Math.max(0, MAX_DESCRIPTION_LENGTH - suffix.length()));
-        return eventName.isEmpty() ? "Reserva " + shortId : eventName + suffix;
+        String eventName = cut(descriptionText(purchaseContext.getDisplayName()), Math.max(0, MAX_DESCRIPTION_LENGTH - suffix.length()));
+        return eventName.isEmpty() ? previous : eventName + suffix;
+    }
+
+    /**
+     * El texto en una línea y solo con los caracteres que Banchile acepta en la descripción: letras
+     * ASCII, dígitos, espacio, {@value #DESCRIPTION_SYMBOLS} y {@value #DESCRIPTION_SPANISH_LETTERS}.
+     * Las comillas tipográficas simples pasan a {@code '} y las rayas, a {@code -}; cualquier otra letra
+     * con diacrítico, a su letra base (por NFD: ô → o, à → a, ç → c), y el resto se elimina. Al final
+     * no quedan espacios repetidos ni en los extremos.
+     *
+     * @param value texto, o null
+     * @return el texto saneado; vacío si no queda nada
+     */
+    private static String descriptionText(String value) {
+        var text = new StringBuilder();
+        singleLine(value).codePoints().forEach(c -> {
+            if (isAsciiLetter(c) || (c >= '0' && c <= '9') || c == ' '
+                || DESCRIPTION_SYMBOLS.indexOf(c) >= 0 || DESCRIPTION_SPANISH_LETTERS.indexOf(c) >= 0) {
+                text.appendCodePoint(c);
+            } else if (c == '‘' || c == '’') {
+                text.append('\'');
+            } else if (c == '–' || c == '—') {
+                text.append('-');
+            } else if (Character.isLetter(c)) {
+                // otra letra con diacrítico: su letra base, si es ASCII (ß, ø o º no tienen)
+                char base = Normalizer.normalize(new String(Character.toChars(c)), Normalizer.Form.NFD).charAt(0);
+                if (isAsciiLetter(base)) {
+                    text.append(base);
+                }
+            }
+        });
+        return singleLine(text.toString());
+    }
+
+    private static boolean isAsciiLetter(int c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
     }
 
     /**

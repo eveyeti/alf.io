@@ -319,33 +319,109 @@ class BanchilePagosWebhookManagerCreateSessionTest {
         assertTrue(Json.GSON.toJson(request).contains("\"skipResult\":true"), Json.GSON.toJson(request));
     }
 
+    /**
+     * Lo único que va en la descripción: lo que el sandbox de Banchile aceptó el 15-oct, menos
+     * {@code $ = < > [ ] |} y {@code à è ç ã}, que se dejan fuera a propósito.
+     */
+    private static final java.util.regex.Pattern DESCRIPTION_CHARACTERS =
+        java.util.regex.Pattern.compile("^[A-Za-z0-9 ,.:;\\-_'()/#&%+@áéíóúñüÁÉÍÓÚÑÜ]+$");
+
+    /**
+     * "¿" y "?" dan HTTP 400 en Banchile ("La información del pago es incorrecta (description)"): el
+     * nombre de "Ya no te gusto, ¿verdad?" llega sin ellos.
+     */
     @Test
     void descriptionIsTheEventNameAndTheShortReservationId() {
         when(event.getDisplayName()).thenReturn("Ya no te gusto, ¿verdad?");
 
-        assertEquals("Ya no te gusto, ¿verdad? - reserva " + SHORT_ID, createSession().payment().description());
+        assertEquals("Ya no te gusto, verdad - reserva " + SHORT_ID, createSession().payment().description());
     }
 
     /**
-     * Banchile admite hasta 250 caracteres alfanuméricos, acentuados y símbolos comunes: el resto
-     * (emojis, saltos de línea) no llega, y un nombre largo se corta sin perder el ID de la reserva.
+     * Nombres de eventos que Banchile aceptó tal cual en el sandbox.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"Gran Bingo Scuola G-27", "Signos (tributo)", "Tributo a Soda Stereo"})
+    void descriptionKeepsEventNamesThatBanchileAccepts(String displayName) {
+        when(event.getDisplayName()).thenReturn(displayName);
+
+        assertEquals(displayName + " - reserva " + SHORT_ID, createSession().payment().description());
+    }
+
+    /**
+     * Los caracteres que Banchile aceptó en el sandbox (embebidos en "Bingo X reserva ABCD1234")
+     * llegan sin cambios.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {",", ".", ":", ";", "-", "_", "'", "(", ")", "/", "#", "&", "%", "+", "@",
+        "á", "é", "í", "ó", "ú", "ñ", "ü", "Á", "É", "Í", "Ó", "Ú", "Ñ", "Ü"})
+    void descriptionKeepsTheCharactersBanchileAccepts(String character) {
+        when(event.getDisplayName()).thenReturn("Bingo " + character + " X");
+
+        assertEquals("Bingo " + character + " X - reserva " + SHORT_ID, createSession().payment().description());
+    }
+
+    /**
+     * Los caracteres que Banchile rechazó con HTTP 400 en el sandbox, y los que acepta pero se dejan
+     * fuera a propósito ({@code $ = < > [ ] |}), no llegan.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"¿", "?", "¡", "!", "\"", "*", "°", "º", "ª", "{", "}", "~", "^", "`", "\\", "´", "¨", "…", "€", "™",
+        "$", "=", "<", ">", "[", "]", "|", "🎉"})
+    void descriptionDropsTheCharactersBanchileRejects(String character) {
+        when(event.getDisplayName()).thenReturn("Bingo" + character + " 2027");
+
+        assertEquals("Bingo 2027 - reserva " + SHORT_ID, createSession().payment().description());
+    }
+
+    /**
+     * Las comillas y los guiones tipográficos que Banchile rechaza pasan a los simples, y las demás
+     * letras con diacrítico, a su letra base: solo quedan las tildes del castellano, la ñ y la ü.
+     */
+    @ParameterizedTest
+    @CsvSource(value = {
+        "Bingo O’Higgins | Bingo O'Higgins",
+        "‘Signos’ | 'Signos'",
+        "Bingo – 2027 | Bingo - 2027",
+        "Bingo — 2027 | Bingo - 2027",
+        "Bingo õ â ê ô | Bingo o a e o",
+        "Ô Â Ê Õ | O A E O",
+        "à è ç ã | a e c a",
+        "Crème Brûlée | Creme Brulée",
+        "Pingüino Ñandú | Pingüino Ñandú"
+    }, delimiter = '|', quoteCharacter = '"')
+    void descriptionReplacesWhatItCanAndKeepsTheSpanishAccents(String displayName, String expected) {
+        when(event.getDisplayName()).thenReturn(displayName);
+
+        assertEquals(expected + " - reserva " + SHORT_ID, createSession().payment().description());
+    }
+
+    /**
+     * Ningún nombre de evento, por raro que sea, hace que la descripción lleve un carácter fuera de
+     * la lista; un nombre largo se corta sin perder el ID de la reserva, en 250 caracteres.
      */
     @Test
-    void descriptionKeepsOnlyCommonCharactersAndIsCutTo250() {
-        when(event.getDisplayName()).thenReturn("Bingo 🎉\n2026™ " + "muy largo ".repeat(40));
+    void descriptionKeepsOnlyTheAllowedCharactersAndIsCutTo250() {
+        when(event.getDisplayName()).thenReturn("Bingo 🎉\n2026™ ¿?¡!\"*°ºª{}~^`\\´¨…€$=<>[]| “x” «y» " + "muy largo ".repeat(40));
 
         var description = createSession().payment().description();
 
-        assertTrue(description.startsWith("Bingo 2026 muy largo"), description);
+        assertTrue(description.startsWith("Bingo 2026 x y muy largo"), description);
         assertTrue(description.endsWith(" - reserva " + SHORT_ID), description);
         assertTrue(description.length() <= 250, description.length() + ": " + description);
+        assertTrue(DESCRIPTION_CHARACTERS.matcher(description).matches(), description);
+        assertFalse(description.contains("  "), description);
     }
 
-    @Test
-    void descriptionWithoutAnEventNameIsTheShortReservationId() {
-        when(event.getDisplayName()).thenReturn(" 🎉 ");
+    /**
+     * Si del nombre del evento no queda nada, va la descripción de antes.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {" 🎉 ", "¿?¡!", "™ € …"})
+    void descriptionWithoutAnEventNameIsTheOneFromBefore(String displayName) {
+        when(event.getDisplayName()).thenReturn(displayName);
 
-        assertEquals("Reserva " + SHORT_ID, createSession().payment().description());
+        assertEquals("Reserva " + REFERENCE, createSession().payment().description());
     }
 
     @Test
