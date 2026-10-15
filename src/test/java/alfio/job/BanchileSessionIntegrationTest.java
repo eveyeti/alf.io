@@ -22,10 +22,16 @@ import alfio.config.Initializer;
 import alfio.controller.api.ControllerConfiguration;
 import alfio.controller.api.v2.user.ReservationApiV2Controller;
 import alfio.manager.EventManager;
+import alfio.manager.NotificationManager;
+import alfio.manager.PurchaseContextManager;
 import alfio.manager.TicketReservationManager;
+import alfio.manager.payment.BanchilePagosClient;
+import alfio.manager.payment.BanchilePagosWebhookManager;
+import alfio.manager.payment.PaymentSpecification;
 import alfio.manager.system.ConfigurationManager;
 import alfio.manager.user.UserManager;
 import alfio.model.Event;
+import alfio.model.Ticket;
 import alfio.model.TicketCategory;
 import alfio.model.TicketReservation.TicketReservationStatus;
 import alfio.model.TicketReservationStatusAndValidation;
@@ -34,9 +40,12 @@ import alfio.model.modification.DateTimeModification;
 import alfio.model.modification.TicketCategoryModification;
 import alfio.model.modification.TicketReservationModification;
 import alfio.model.modification.TicketReservationWithOptionalCodeModification;
+import alfio.model.transaction.Transaction;
 import alfio.repository.EventRepository;
 import alfio.repository.TicketCategoryRepository;
+import alfio.repository.TicketRepository;
 import alfio.repository.TicketReservationRepository;
+import alfio.repository.TransactionRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.test.util.AlfioIntegrationTest;
@@ -54,13 +63,20 @@ import org.mockserver.matchers.Times;
 import org.mockserver.model.MediaType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.util.*;
 
 import static alfio.model.TicketReservation.TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT;
@@ -69,18 +85,25 @@ import static alfio.model.system.ConfigurationKeys.*;
 import static alfio.test.util.IntegrationTestUtil.AVAILABLE_SEATS;
 import static alfio.test.util.IntegrationTestUtil.initEvent;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * La sesión que alf.io crea en Banchile cuando el comprador aprieta "Pagar", contra un Banchile
- * falso local (MockServer).
+ * La sesión que alf.io crea en Banchile cuando el comprador aprieta "Pagar", y qué pasa con la
+ * reserva cuando esa sesión termina sin pago, contra un Banchile falso local (MockServer).
  *
  * <p>El comprador entra por el controller ({@code POST /api/v2/public/reservation/{id}}, con
  * MockMvc): así se prueba que {@code doPayment} corre en el hilo del request y saca de ahí la IP y
  * el navegador del comprador.
+ *
+ * <p>La reserva queda vigente hasta 15 minutos después de que vence la sesión: si Banchile informa la
+ * sesión vencida (EX) o cancelada (?C), el cron o el poll la encuentran vigente y el flujo de pago
+ * fallido de alf.io le da al comprador la opción de reintentar en vez de anularla.
  */
 @AlfioIntegrationTest
 @ContextConfiguration(classes = {
@@ -100,6 +123,10 @@ class BanchileSessionIntegrationTest {
         {"paymentProxy": "BANCHILE", "selectedPaymentMethod": "CREDIT_CARD",
          "termAndConditionsAccepted": true, "privacyPolicyAccepted": true}
         """;
+    /** Correo de pago fallido con la reserva vigente (email-transaction-failed.retry, en inglés). */
+    private static final String RETRY_EMAIL = "You can safely retry by opening the reservation page at";
+    /** Correo de pago fallido con la reserva anulada (email-transaction-failed.cancelled, en inglés). */
+    private static final String CANCELLED_EMAIL = "The reservation has been cancelled";
 
     private static ClientAndServer banchile;
 
@@ -123,6 +150,24 @@ class BanchileSessionIntegrationTest {
     private UserManager userManager;
     @Autowired
     private ReservationApiV2Controller reservationApiV2Controller;
+    @Autowired
+    private BanchilePagosWebhookManager banchilePagosWebhookManager;
+    @Autowired
+    private BanchilePagosClient banchilePagosClient;
+    @Autowired
+    private TransactionRepository transactionRepository;
+    @Autowired
+    private TicketRepository ticketRepository;
+    @Autowired
+    private PurchaseContextManager purchaseContextManager;
+    @Autowired
+    private NotificationManager notificationManager;
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+    @Autowired
+    private ClockProvider clockProvider;
+    @Autowired
+    private NamedParameterJdbcTemplate jdbc;
 
     @BeforeAll
     static void startFakeBanchile() {
@@ -188,6 +233,114 @@ class BanchileSessionIntegrationTest {
     }
 
     // -------------------------------------------------------------------------
+    // La validez de la reserva cubre la sesión: el pago fallido permite reintentar
+    // -------------------------------------------------------------------------
+
+    /**
+     * Al crear la sesión, la reserva queda vigente hasta 15 minutos después de que vence la sesión
+     * (nunca menos que antes), en la misma transacción que la deja en EXTERNAL_PROCESSING_PAYMENT.
+     */
+    @Test
+    void payingFromTheOverviewExtendsTheReservationUntilFifteenMinutesAfterTheSession() throws Exception {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        var validityBefore = ticketReservationRepository.findReservationById(reservationId).getValidity();
+        banchileCreatesTheSession(51002);
+
+        MockMvcBuilders.standaloneSetup(reservationApiV2Controller).build()
+            .perform(post("/api/v2/public/reservation/{reservationId}", reservationId)
+                .param("lang", "en")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .content(PAY_WITH_BANCHILE))
+            .andExpect(status().isOk());
+
+        assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationStatus(reservationId));
+        var sessionExpiration = Instant.parse(lastCreateSessionBody().get("expiration").getAsString());
+        var extended = Date.from(sessionExpiration.plus(Duration.ofMinutes(15)));
+        var expected = extended.after(validityBefore) ? extended : validityBefore;
+        assertEquals(expected.toInstant(), validity(reservationId).toInstant());
+    }
+
+    /**
+     * La sesión vence sin pago (Banchile la informa REJECTED con razón EX, como 42 de las 51 sesiones
+     * fallidas de "Ya no te gusto") y el cron la detecta 12 minutos después, en el peor caso. La
+     * reserva sigue vigente: vuelve a PENDING con al menos 10 minutos para reintentar y el comprador
+     * recibe el correo de reintento, no el de reserva anulada.
+     */
+    @Test
+    void anExpiredSessionThatTheCronDetectsTwelveMinutesLaterLetsTheBuyerRetry() {
+        var event = createEvent();
+        var now = Instant.now();
+        // creada hace 47 minutos (vence a los 25) y mandada a pagar 5 minutos después: la sesión venció hace 12
+        var reservationId = reservationOf(event, Date.from(now.minus(Duration.ofMinutes(22))));
+        var payTime = now.minus(Duration.ofMinutes(42));
+        payWithBanchileAt(event, reservationId, 52001, payTime);
+        assertEquals(Date.from(payTime.plus(Duration.ofMinutes(45))).toInstant(), validity(reservationId).toInstant(),
+            "la reserva vence 15 minutos después de la sesión");
+        banchileResponds(52001, rejected(52001, "EX", "La petición ha expirado"));
+
+        cron().reconcilePendingBanchileTransactions();
+
+        assertTheBuyerCanRetry(event, reservationId);
+    }
+
+    /**
+     * El comprador apretó "Pagar" con la reserva a punto de vencer, le rechazaron la tarjeta y canceló
+     * en Banchile (REJECTED con razón ?C) cuando la validez original ya había pasado. El poll del
+     * navegador lo detecta y le permite reintentar en vez de anular la reserva.
+     */
+    @Test
+    void aSessionCancelledAfterTheOriginalValidityLetsTheBuyerRetryFromThePoll() {
+        var event = createEvent();
+        var now = Instant.now();
+        // creada hace 30 minutos: su validez original venció hace 5. Se mandó a pagar hace 10
+        var reservationId = reservationOf(event, Date.from(now.minus(Duration.ofMinutes(5))));
+        payWithBanchileAt(event, reservationId, 52002, now.minus(Duration.ofMinutes(10)));
+        banchileResponds(52002, rejected(52002, "?C", "El usuario canceló la transacción"));
+
+        reservationApiV2Controller.getReservationStatus(reservationId);
+
+        assertTheBuyerCanRetry(event, reservationId);
+    }
+
+    /**
+     * El margen es de 15 minutos: si el resultado se detecta después (el cron no corrió durante más de
+     * un ciclo), la reserva ya venció y alf.io la anula, como antes.
+     */
+    @Test
+    void anExpirationDetectedAfterTheMarginStillCancelsTheReservation() {
+        var event = createEvent();
+        var now = Instant.now();
+        // mandada a pagar hace 47 minutos: la sesión venció hace 17 y la reserva, hace 2
+        var reservationId = reservationOf(event, Date.from(now.minus(Duration.ofMinutes(27))));
+        payWithBanchileAt(event, reservationId, 52003, now.minus(Duration.ofMinutes(47)));
+        banchileResponds(52003, rejected(52003, "EX", "La petición ha expirado"));
+
+        cron().reconcilePendingBanchileTransactions();
+
+        assertTrue(ticketReservationRepository.findOptionalReservationById(reservationId).isEmpty(),
+            "el flujo de pago fallido anula la reserva vencida");
+        assertTrue(buyerEmails(event).stream().anyMatch(m -> m.contains(CANCELLED_EMAIL)), String.valueOf(buyerEmails(event)));
+    }
+
+    /**
+     * Si Banchile no crea la sesión, la reserva no cambia: ni su validez ni su estado.
+     */
+    @Test
+    void ifBanchileDoesNotCreateTheSessionTheValidityIsNotTouched() {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        var validityBefore = validity(reservationId);
+        banchile.when(request().withMethod("POST").withPath("/api/session"), Times.once())
+            .respond(response().withStatusCode(500).withContentType(MediaType.APPLICATION_JSON).withBody("{}"));
+
+        assertTrue(banchilePagosWebhookManager.doPayment(paymentSpecification(event, reservationId)).isFailed());
+
+        assertEquals(validityBefore.toInstant(), validity(reservationId).toInstant());
+        assertEquals(PENDING, reservationStatus(reservationId));
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
@@ -216,6 +369,81 @@ class BanchileSessionIntegrationTest {
         ticketReservationRepository.updateTicketReservation(reservationId, PENDING.name(), BUYER_EMAIL,
             "María José Núñez Peña", "María José", "Núñez Peña", "en", null, null, null, null);
         return reservationId;
+    }
+
+    private PaymentSpecification paymentSpecification(Event event, String reservationId) {
+        var reservation = ticketReservationRepository.findReservationById(reservationId);
+        var totalPrice = ticketReservationManager.totalReservationCostWithVAT(reservation).getLeft();
+        return new PaymentSpecification(reservation, totalPrice, event, null,
+            ticketReservationManager.orderSummaryForReservation(reservation, event), true, true);
+    }
+
+    /**
+     * {@link BanchilePagosWebhookManager#doPayment} como si el comprador hubiera apretado "Pagar" en
+     * {@code payTime}. El reloj de los tests está fijo en las 10:00 UTC de hoy y el flujo de pago
+     * fallido de alf.io compara con la hora real: por eso esta sesión se crea con un manager cuyo
+     * reloj marca {@code payTime}.
+     */
+    private void payWithBanchileAt(Event event, String reservationId, int requestId, Instant payTime) {
+        banchileCreatesTheSession(requestId);
+        var clock = mock(ClockProvider.class);
+        when(clock.getClock()).thenReturn(Clock.fixed(payTime, ZoneOffset.UTC));
+        when(clock.withZone(any())).thenAnswer(invocation -> Clock.fixed(payTime, invocation.getArgument(0)));
+        var managerAtPayTime = new BanchilePagosWebhookManager(configurationManager, banchilePagosClient, transactionRepository,
+            ticketReservationRepository, clock, notificationManager, organizationRepository);
+        assertTrue(managerAtPayTime.doPayment(paymentSpecification(event, reservationId)).isRedirect(),
+            "doPayment debía redirigir a Banchile");
+        assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationStatus(reservationId));
+    }
+
+    /** El cron de conciliación de 12 minutos, ejecutado a mano. */
+    private BanchileReconciliationJob cron() {
+        return new BanchileReconciliationJob(transactionRepository, ticketReservationManager, ticketReservationRepository,
+            purchaseContextManager, banchilePagosWebhookManager, new TransactionTemplate(transactionManager), clockProvider);
+    }
+
+    /**
+     * La reserva sigue viva para reintentar: PENDING, vigente al menos 10 minutos más, con sus
+     * entradas, la transacción cerrada como FAILED y el correo de reintento al comprador, no el de
+     * reserva anulada.
+     */
+    private void assertTheBuyerCanRetry(Event event, String reservationId) {
+        assertEquals(PENDING, reservationStatus(reservationId), "la reserva vuelve a PENDING para reintentar");
+        var validity = validity(reservationId);
+        assertTrue(validity.after(DateUtils.addMinutes(new Date(), 9)), "debía quedar vigente al menos 10 minutos más: " + validity);
+        assertEquals(Transaction.Status.FAILED, transactionRepository.loadOptionalByReservationId(reservationId).orElseThrow().getStatus());
+        var tickets = ticketRepository.findTicketsInReservation(reservationId);
+        assertEquals(2, tickets.size(), "la reserva conserva sus entradas");
+        assertTrue(tickets.stream().allMatch(t -> t.getStatus() == Ticket.TicketStatus.PENDING), String.valueOf(tickets));
+        var emails = buyerEmails(event);
+        assertTrue(emails.stream().anyMatch(m -> m.contains(RETRY_EMAIL)), "el comprador debía recibir el correo de reintento: " + emails);
+        assertTrue(emails.stream().noneMatch(m -> m.contains(CANCELLED_EMAIL)), "no el de reserva anulada: " + emails);
+    }
+
+    private Date validity(String reservationId) {
+        return ticketReservationRepository.findReservationById(reservationId).getValidity();
+    }
+
+    private List<String> buyerEmails(Event event) {
+        return jdbc.queryForList("select message from email_message where event_id = :eventId and recipient = :recipient order by id",
+            Map.of("eventId", event.getId(), "recipient", BUYER_EMAIL), String.class);
+    }
+
+    private static void banchileResponds(int requestId, String body) {
+        var querySession = request().withMethod("POST").withPath("/api/session/" + requestId);
+        banchile.clear(querySession);
+        banchile.when(querySession).respond(response().withStatusCode(200).withContentType(MediaType.APPLICATION_JSON).withBody(body));
+    }
+
+    /**
+     * querySession de una sesión cerrada sin pago: REJECTED con la razón de Banchile (EX si venció,
+     * ?C si el comprador canceló).
+     */
+    private static String rejected(int requestId, String reason, String message) {
+        return """
+            {"requestId": %d,
+             "status": {"status": "REJECTED", "reason": "%s", "message": "%s", "date": "2026-11-28T18:40:00-03:00"}}
+            """.formatted(requestId, reason, message);
     }
 
     private static void banchileCreatesTheSession(int requestId) {

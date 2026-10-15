@@ -192,6 +192,22 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
     private static final String NOT_REPORTED = "no informado";
 
+    /**
+     * Duración de una sesión de Banchile: el comprador puede pagar hasta 30 minutos después de apretar
+     * "Pagar". De ella sale, una sola vez, el vencimiento que se manda a Banchile y la nueva validez de
+     * la reserva.
+     */
+    static final Duration SESSION_DURATION = Duration.ofMinutes(30);
+
+    /**
+     * Cuánto más que la sesión queda vigente la reserva: un ciclo completo del cron de conciliación
+     * ({@code BanchileReconciliationJob}, cada 12 minutos) más 3 de margen. Cuando Banchile informa la
+     * sesión vencida o rechazada la reserva sigue vigente, y el flujo de pago fallido de alf.io la
+     * devuelve a PENDING para que el comprador reintente (con al menos
+     * RESERVATION_MIN_TIMEOUT_AFTER_FAILED_PAYMENT minutos, 10 por defecto) en vez de anularla.
+     */
+    static final Duration RESERVATION_VALIDITY_AFTER_SESSION = Duration.ofMinutes(15);
+
     /** IP que se manda a Banchile cuando no hay una IP válida del comprador (el valor de siempre). */
     static final String UNKNOWN_IP_ADDRESS = "0.0.0.0";
 
@@ -355,8 +371,9 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             // este valor se envía por completitud pero Banchile no lo respeta.
             String notificationUrl = alfioBaseUrl + WEBHOOK_URL_TEMPLATE;
 
-            // Expiración: 30 minutos desde ahora
-            String expiration = purchaseContext.now(clockProvider).plusMinutes(30).toInstant().toString();
+            // Vencimiento de la sesión: el mismo para Banchile y para la nueva validez de la reserva
+            ZonedDateTime sessionExpiration = purchaseContext.now(clockProvider).plus(SESSION_DURATION);
+            String expiration = sessionExpiration.toInstant().toString();
 
             Buyer buyer = buyerOf(reservation);
             HttpServletRequest buyerRequest = currentRequest();
@@ -387,8 +404,9 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             String requestIdStr = String.valueOf(sessionResponse.requestId());
             String processUrl = sessionResponse.processUrl();
 
-            // Actualizar estado de la reserva
+            // Actualizar estado y validez de la reserva
             ticketReservationRepository.updateReservationStatus(reservationId, EXTERNAL_PROCESSING_PAYMENT.toString());
+            Date validity = extendValidity(reservationId, reservation, sessionExpiration);
 
             // Invalidar transacciones previas e insertar la nueva
             invalidateExistingTransactions(reservationId, transactionRepository);
@@ -407,8 +425,9 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             );
 
             // sin datos personales en el log: solo si se mandaron
-            log.info("Sesión Banchile creada: requestId={} para reserva={} (comprador={}, IP del comprador={}, user-agent del comprador={})",
-                requestIdStr, reservationId, buyer != null, !UNKNOWN_IP_ADDRESS.equals(ipAddress), !DEFAULT_USER_AGENT.equals(userAgent));
+            log.info("Sesión Banchile creada: requestId={} para reserva={}, vigente hasta {} (comprador={}, IP del comprador={}, "
+                    + "user-agent del comprador={})", requestIdStr, reservationId, validity.toInstant(), buyer != null,
+                !UNKNOWN_IP_ADDRESS.equals(ipAddress), !DEFAULT_USER_AGENT.equals(userAgent));
             return PaymentResult.redirect(processUrl);
 
         } catch (BanchilePagosClient.BanchilePagosException e) {
@@ -1113,6 +1132,29 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      */
     private static String merchantReference(String reservationId) {
         return reservationId.replace("-", "");
+    }
+
+    /**
+     * Deja la reserva vigente hasta {@link #RESERVATION_VALIDITY_AFTER_SESSION} después del vencimiento
+     * de la sesión, como Mollie, Saferpay y PayPal al crear el pago. La validez se alarga, nunca se
+     * acorta: max(validez actual, vencimiento de la sesión + 15 minutos). Corre después de crear la
+     * sesión, en la transacción de {@code TicketReservationManager#performPayment}, que tiene la reserva
+     * bloqueada ({@code select ... for update}): queda junto con el paso a EXTERNAL_PROCESSING_PAYMENT
+     * y la transacción PENDING, o no queda ninguno.
+     *
+     * @param reservationId     reserva
+     * @param reservation       la reserva leída dentro de esa transacción, o null si no se encontró
+     * @param sessionExpiration vencimiento de la sesión que se mandó a Banchile
+     * @return la validez con que queda la reserva
+     */
+    private Date extendValidity(String reservationId, TicketReservation reservation, ZonedDateTime sessionExpiration) {
+        Date extended = Date.from(sessionExpiration.plus(RESERVATION_VALIDITY_AFTER_SESSION).toInstant());
+        Date current = reservation != null ? reservation.getValidity() : null;
+        if (current != null && !current.before(extended)) {
+            return current;
+        }
+        ticketReservationRepository.updateValidity(reservationId, extended);
+        return extended;
     }
 
     /**

@@ -45,8 +45,11 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.Map;
 
@@ -349,6 +352,65 @@ class BanchilePagosWebhookManagerCreateSessionTest {
     }
 
     // -------------------------------------------------------------------------
+    // Validez de la reserva
+    // -------------------------------------------------------------------------
+
+    /**
+     * La reserva vence 25 minutos después de creada y la sesión, 30 después de apretar "Pagar": sin
+     * alargarla, cuando Banchile informa la sesión vencida la reserva ya venció y alf.io la anula. Al
+     * crear la sesión, la validez pasa a 15 minutos después de su vencimiento (un ciclo del cron de 12
+     * minutos más margen), calculado con el mismo vencimiento que se manda a Banchile.
+     */
+    @Test
+    void extendsTheReservationValidityToFifteenMinutesAfterTheSessionExpiration() {
+        when(reservation.getValidity()).thenReturn(minutesFromNow(25));
+        var before = Instant.now();
+
+        var request = createSession();
+
+        var after = Instant.now();
+        var sessionExpiration = Instant.parse(request.expiration());
+        assertFalse(sessionExpiration.isBefore(before.plus(Duration.ofMinutes(30)).truncatedTo(ChronoUnit.MILLIS)), request.expiration());
+        assertFalse(sessionExpiration.isAfter(after.plus(Duration.ofMinutes(30))), request.expiration());
+        verify(ticketReservationRepository).updateValidity(RESERVATION_ID, Date.from(sessionExpiration.plus(Duration.ofMinutes(15))));
+    }
+
+    /**
+     * La validez se alarga, nunca se acorta: max(validez actual, vencimiento de la sesión + 15 min).
+     */
+    @Test
+    void doesNotShortenALongerValidity() {
+        when(reservation.getValidity()).thenReturn(minutesFromNow(120));
+
+        createSession();
+
+        verify(ticketReservationRepository, never()).updateValidity(anyString(), any(Date.class));
+    }
+
+    @Test
+    void doesNotTouchTheValidityWhenBanchileDoesNotCreateTheSession() {
+        when(reservation.getValidity()).thenReturn(minutesFromNow(25));
+        when(banchilePagosClient.createSession(any(), eq(BASE_URL)))
+            .thenThrow(new BanchilePagosClient.BanchilePagosException("Banchile Pagos devolvió HTTP 500 en createSession", 500));
+
+        assertTrue(manager.doPayment(paymentSpecification()).isFailed());
+
+        verify(ticketReservationRepository, never()).updateValidity(anyString(), any(Date.class));
+        verify(ticketReservationRepository, never()).updateReservationStatus(anyString(), anyString());
+    }
+
+    @Test
+    void doesNotTouchTheValidityWhenBanchileAnswersWithoutTheSession() {
+        when(reservation.getValidity()).thenReturn(minutesFromNow(25));
+        when(banchilePagosClient.createSession(any(), eq(BASE_URL))).thenReturn(new SessionResponse(
+            new SessionResponse.Status("FAILED", "XN", "Error", "2026-11-28T18:00:00-03:00"), null, null, null));
+
+        assertTrue(manager.doPayment(paymentSpecification()).isFailed());
+
+        verify(ticketReservationRepository, never()).updateValidity(anyString(), any(Date.class));
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
@@ -366,11 +428,18 @@ class BanchilePagosWebhookManagerCreateSessionTest {
      * que alf.io le mandó.
      */
     private CreateSessionRequest createSession() {
-        var spec = new PaymentSpecification(RESERVATION_ID, null, 24000, event, "maria.nunez@example.com",
-            new CustomerName("María José Núñez Peña", "María José", "Núñez Peña", true));
-        assertTrue(manager.doPayment(spec).isRedirect(), "doPayment debía redirigir a Banchile");
+        assertTrue(manager.doPayment(paymentSpecification()).isRedirect(), "doPayment debía redirigir a Banchile");
         var captor = ArgumentCaptor.forClass(CreateSessionRequest.class);
         verify(banchilePagosClient).createSession(captor.capture(), eq(BASE_URL));
         return captor.getValue();
+    }
+
+    private PaymentSpecification paymentSpecification() {
+        return new PaymentSpecification(RESERVATION_ID, null, 24000, event, "maria.nunez@example.com",
+            new CustomerName("María José Núñez Peña", "María José", "Núñez Peña", true));
+    }
+
+    private static Date minutesFromNow(int minutes) {
+        return Date.from(Instant.now().plus(Duration.ofMinutes(minutes)));
     }
 }
