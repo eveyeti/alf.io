@@ -643,6 +643,28 @@ class BanchilePagosWebhookManagerCreateSessionTest {
         assertEquals("A" + "a".repeat(59), buyer.name());
     }
 
+    /**
+     * Revisor (ronda 2): el ID corto también se sanea. Con USE_INVOICE_NUMBER_AS_ID es el número de
+     * boleta, que puede traer símbolos que Banchile rechaza (mata la mutación que no lo sanea).
+     */
+    @Test
+    void reviewerTheShortIdIsAlsoSanitized() {
+        when(configurationManager.getShortReservationID(event, reservation)).thenReturn("N°¿2026-001?");
+
+        assertEquals("Bingo Viaggio 2027 - reserva N2026-001", createSession().payment().description());
+    }
+
+    /**
+     * Revisor (ronda 2): si del ID corto no queda nada, va la descripción de antes (mata la mutación
+     * que usa el sufijo vacío).
+     */
+    @Test
+    void reviewerAShortIdWithNothingAllowedGivesTheOldDescription() {
+        when(configurationManager.getShortReservationID(event, reservation)).thenReturn("¿?");
+
+        assertEquals("Reserva " + REFERENCE, createSession().payment().description());
+    }
+
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
