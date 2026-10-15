@@ -79,6 +79,7 @@ class BanchilePagosWebhookManagerCreateSessionTest {
     private ConfigurationManager configurationManager;
     private BanchilePagosClient banchilePagosClient;
     private TicketReservationRepository ticketReservationRepository;
+    private TransactionRepository transactionRepository;
     private Event event;
     private TicketReservation reservation;
     private BanchilePagosWebhookManager manager;
@@ -88,6 +89,7 @@ class BanchilePagosWebhookManagerCreateSessionTest {
         configurationManager = mock(ConfigurationManager.class);
         banchilePagosClient = mock(BanchilePagosClient.class);
         ticketReservationRepository = mock(TicketReservationRepository.class);
+        transactionRepository = mock(TransactionRepository.class);
 
         event = mock(Event.class);
         when(event.getZoneId()).thenReturn(ZoneId.of("America/Santiago"));
@@ -117,7 +119,7 @@ class BanchilePagosWebhookManagerCreateSessionTest {
             new SessionResponse.Status("OK", "PC", "La petición se ha procesado correctamente", "2026-11-28T18:00:00-03:00"),
             51001, "https://checkout.test.banchilepagos.cl/spa/session/51001/abc", null));
 
-        manager = new BanchilePagosWebhookManager(configurationManager, banchilePagosClient, mock(TransactionRepository.class),
+        manager = new BanchilePagosWebhookManager(configurationManager, banchilePagosClient, transactionRepository,
             ticketReservationRepository, TestUtil.clockProvider(), mock(NotificationManager.class), mock(OrganizationRepository.class));
     }
 
@@ -349,6 +351,79 @@ class BanchilePagosWebhookManagerCreateSessionTest {
     @Test
     void referenceIsStillTheReservationIdWithoutDashes() {
         assertEquals(REFERENCE, createSession().payment().reference());
+    }
+
+    // -------------------------------------------------------------------------
+    // Banchile rechaza los datos nuevos: la sesión de siempre
+    // -------------------------------------------------------------------------
+
+    /**
+     * Si Banchile rechaza la request por inválida (HTTP 400, como "request_not_valid"), alf.io la
+     * reintenta una vez como antes: sin comprador, IP 0.0.0.0, user-agent alfio/banchile, la
+     * descripción "Reserva <referencia>" y sin skipResult, con credenciales nuevas. Un dato del
+     * comprador que Banchile no acepte no puede impedir el pago.
+     */
+    @Test
+    void retriesTheSessionAsBeforeWhenBanchileRejectsTheRequest() {
+        onRequestFrom("203.0.113.7", IPHONE_SAFARI);
+        when(reservation.getValidity()).thenReturn(minutesFromNow(25));
+        when(banchilePagosClient.createSession(any(), eq(BASE_URL)))
+            .thenThrow(new BanchilePagosClient.BanchilePagosException("Banchile Pagos devolvió HTTP 400 en createSession: request_not_valid", 400))
+            .thenReturn(new SessionResponse(
+                new SessionResponse.Status("OK", "PC", "La petición se ha procesado correctamente", "2026-11-28T18:00:00-03:00"),
+                51009, "https://checkout.test.banchilepagos.cl/spa/session/51009/abc", null));
+
+        var result = manager.doPayment(paymentSpecification());
+
+        assertTrue(result.isRedirect(), "el comprador va a Banchile igual");
+        assertEquals("https://checkout.test.banchilepagos.cl/spa/session/51009/abc", result.getRedirectUrl());
+        var captor = ArgumentCaptor.forClass(CreateSessionRequest.class);
+        verify(banchilePagosClient, times(2)).createSession(captor.capture(), eq(BASE_URL));
+        var first = captor.getAllValues().get(0);
+        var retry = captor.getAllValues().get(1);
+        assertNotNull(first.buyer());
+        assertNull(retry.buyer());
+        assertEquals("0.0.0.0", retry.ipAddress());
+        assertEquals("alfio/banchile", retry.userAgent());
+        assertNull(retry.skipResult());
+        assertEquals("Reserva " + REFERENCE, retry.payment().description());
+        assertEquals(REFERENCE, retry.payment().reference());
+        assertEquals(first.payment().amount(), retry.payment().amount());
+        assertEquals(first.expiration(), retry.expiration());
+        assertEquals(first.returnUrl(), retry.returnUrl());
+        assertEquals(first.cancelUrl(), retry.cancelUrl());
+        assertNotEquals(first.auth().nonce(), retry.auth().nonce(), "cada llamada a Banchile lleva credenciales nuevas");
+        verify(ticketReservationRepository).updateValidity(eq(RESERVATION_ID), any(Date.class));
+        verify(transactionRepository).insert(eq("51009"), eq("51009"), eq(RESERVATION_ID), any(), anyInt(), any(), any(),
+            any(), anyLong(), anyLong(), any(), any());
+    }
+
+    /**
+     * Solo un 400 se reintenta: un 400 no crea la sesión. Con un timeout la sesión puede haberse
+     * creado, y un 401 o un 5xx no se arreglan sacando los datos del comprador.
+     */
+    @ParameterizedTest
+    @ValueSource(ints = {401, 403, 500, 503, -1})
+    void doesNotRetryOtherErrors(int httpStatus) {
+        when(banchilePagosClient.createSession(any(), eq(BASE_URL)))
+            .thenThrow(new BanchilePagosClient.BanchilePagosException("Banchile Pagos devolvió HTTP " + httpStatus, httpStatus));
+
+        assertTrue(manager.doPayment(paymentSpecification()).isFailed());
+
+        verify(banchilePagosClient, times(1)).createSession(any(), eq(BASE_URL));
+        verify(ticketReservationRepository, never()).updateValidity(anyString(), any(Date.class));
+    }
+
+    @Test
+    void failsWhenBanchileAlsoRejectsTheRetry() {
+        when(banchilePagosClient.createSession(any(), eq(BASE_URL)))
+            .thenThrow(new BanchilePagosClient.BanchilePagosException("Banchile Pagos devolvió HTTP 400 en createSession", 400));
+
+        assertTrue(manager.doPayment(paymentSpecification()).isFailed());
+
+        verify(banchilePagosClient, times(2)).createSession(any(), eq(BASE_URL));
+        verify(ticketReservationRepository, never()).updateValidity(anyString(), any(Date.class));
+        verify(ticketReservationRepository, never()).updateReservationStatus(anyString(), anyString());
     }
 
     // -------------------------------------------------------------------------

@@ -208,6 +208,9 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      */
     static final Duration RESERVATION_VALIDITY_AFTER_SESSION = Duration.ofMinutes(15);
 
+    /** Respuesta de Banchile a una request inválida ("request_not_valid"): no crea la sesión. */
+    private static final int HTTP_BAD_REQUEST = 400;
+
     /** IP que se manda a Banchile cuando no hay una IP válida del comprador (el valor de siempre). */
     static final String UNKNOWN_IP_ADDRESS = "0.0.0.0";
 
@@ -330,7 +333,13 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * hilo del request que confirma la reserva ({@code ReservationApiV2Controller#confirmOverview} →
      * {@code TicketReservationManager#performPayment}), así que la IP y el navegador salen de ese
      * request. Ningún dato del comprador hace fallar la sesión: si falta o no es válido, va lo de
-     * antes (sin comprador, IP {@value #UNKNOWN_IP_ADDRESS}, user-agent {@value #DEFAULT_USER_AGENT}).
+     * antes (sin comprador, IP {@value #UNKNOWN_IP_ADDRESS}, user-agent {@value #DEFAULT_USER_AGENT}),
+     * y si Banchile igual rechaza la request por inválida (HTTP 400), se reintenta una vez como se
+     * mandaba antes: sin esos datos, sin {@code skipResult} y con la descripción
+     * {@code Reserva <referencia>}.
+     *
+     * <p>Con la sesión creada, la reserva queda vigente hasta {@link #RESERVATION_VALIDITY_AFTER_SESSION}
+     * después del vencimiento de la sesión (ver {@link #extendValidity}).
      *
      * @param spec Especificación del pago
      * @return PaymentResult.redirect(processUrl) si tuvo éxito, PaymentResult.failed si no
@@ -394,7 +403,22 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                 Boolean.TRUE // skipResult: al terminar, Banchile vuelve directo al returnUrl
             );
 
-            SessionResponse sessionResponse = banchilePagosClient.createSession(req, baseUrl);
+            SessionResponse sessionResponse;
+            try {
+                sessionResponse = banchilePagosClient.createSession(req, baseUrl);
+            } catch (BanchilePagosClient.BanchilePagosException e) {
+                if (e.getHttpStatus() != HTTP_BAD_REQUEST) {
+                    throw e;
+                }
+                // un dato del comprador que Banchile no acepte no puede impedir el pago: la sesión de siempre.
+                // Un 400 no crea la sesión, así que el reintento no la duplica
+                log.warn("Banchile rechazó la sesión de la reserva {} (HTTP 400): se reintenta sin comprador, IP, "
+                    + "user-agent ni skipResult y con la descripción de antes", reservationId);
+                req = new CreateSessionRequest(BanchilePagosClient.buildAuth(login, tranKey), req.locale(), null,
+                    new Payment(reference, "Reserva " + reference, amount), returnUrl, cancelUrl, notificationUrl,
+                    UNKNOWN_IP_ADDRESS, DEFAULT_USER_AGENT, expiration);
+                sessionResponse = banchilePagosClient.createSession(req, baseUrl);
+            }
 
             if (sessionResponse == null || sessionResponse.requestId() == null || sessionResponse.processUrl() == null) {
                 log.warn("createSession devolvió respuesta incompleta para reserva {}", reservationId);
@@ -426,8 +450,8 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
             // sin datos personales en el log: solo si se mandaron
             log.info("Sesión Banchile creada: requestId={} para reserva={}, vigente hasta {} (comprador={}, IP del comprador={}, "
-                    + "user-agent del comprador={})", requestIdStr, reservationId, validity.toInstant(), buyer != null,
-                !UNKNOWN_IP_ADDRESS.equals(ipAddress), !DEFAULT_USER_AGENT.equals(userAgent));
+                    + "user-agent del comprador={}, skipResult={})", requestIdStr, reservationId, validity.toInstant(), req.buyer() != null,
+                !UNKNOWN_IP_ADDRESS.equals(req.ipAddress()), !DEFAULT_USER_AGENT.equals(req.userAgent()), req.skipResult() != null);
             return PaymentResult.redirect(processUrl);
 
         } catch (BanchilePagosClient.BanchilePagosException e) {
