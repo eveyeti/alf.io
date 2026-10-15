@@ -1173,8 +1173,14 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * de la sesión, como Mollie, Saferpay y PayPal al crear el pago. La validez se alarga, nunca se
      * acorta: max(validez actual, vencimiento de la sesión + 15 minutos). Corre después de crear la
      * sesión, en la transacción de {@code TicketReservationManager#performPayment}, que tiene la reserva
-     * bloqueada ({@code select ... for update}): queda junto con el paso a EXTERNAL_PROCESSING_PAYMENT
-     * y la transacción PENDING, o no queda ninguno.
+     * bloqueada ({@code select ... for update}), junto con el paso a EXTERNAL_PROCESSING_PAYMENT y la
+     * transacción PENDING.
+     *
+     * <p>No es todo o nada: doPayment atrapa las excepciones. Si después de alargar la validez falla
+     * {@code invalidateExistingTransactions} (su {@code Validate} lanza si queda otra transacción
+     * activa), doPayment devuelve failed, {@code performPayment} vuelve la reserva a PENDING y confirma.
+     * La validez queda alargada y la sesión de Banchile, huérfana: nadie recibió su processUrl, así que
+     * no se puede pagar y vence sola. No hace daño: la reserva queda vigente un rato más.
      *
      * @param reservationId     reserva
      * @param reservation       la reserva leída dentro de esa transacción, o null si no se encontró
@@ -1293,6 +1299,11 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * entre corchetes). Solo se acepta una IP literal, que se valida sin resolver nombres, y pública:
      * una IP privada, de loopback, de enlace local o de CGNAT no es la del comprador (en producción
      * los clientes IPv6 llegan como 172.x por el userland-proxy de Docker).
+     *
+     * <p>Ojo: Jetty le da prioridad al header {@code Forwarded} (RFC 7239) sobre
+     * {@code X-Forwarded-For}, y Caddy no lo quita. Con un {@code Forwarded: for=...} propio, el
+     * comprador elige la IP que ve alf.io (y la que llega a Banchile). Se arregla en Caddy, quitando
+     * ese header del request ({@code request_header -Forwarded}), no en este código.
      *
      * @param request request del comprador, o null
      * @return la IP sin corchetes, o {@value #UNKNOWN_IP_ADDRESS} si no hay request, no es una IP o
