@@ -31,6 +31,9 @@ package alfio.model.transaction.banchile;
  * @param ipAddress       IP del comprador
  * @param userAgent       User-Agent del comprador
  * @param expiration      Vencimiento de la sesión en ISO-8601, p.ej. "2026-05-18T12:00:00Z"
+ * @param skipResult      true para que Banchile, al terminar el pago, vuelva directo al
+ *                        {@code returnUrl} sin mostrar su pantalla de resultado; null no lo envía
+ *                        (Banchile la muestra)
  */
 public record CreateSessionRequest(
     Auth auth,
@@ -42,8 +45,26 @@ public record CreateSessionRequest(
     String notificationUrl,
     String ipAddress,
     String userAgent,
-    String expiration
+    String expiration,
+    Boolean skipResult
 ) {
+
+    /**
+     * Request sin {@code skipResult}: Banchile muestra su pantalla de resultado antes de volver al
+     * comercio.
+     */
+    public CreateSessionRequest(Auth auth,
+                                String locale,
+                                Buyer buyer,
+                                Payment payment,
+                                String returnUrl,
+                                String cancelUrl,
+                                String notificationUrl,
+                                String ipAddress,
+                                String userAgent,
+                                String expiration) {
+        this(auth, locale, buyer, payment, returnUrl, cancelUrl, notificationUrl, ipAddress, userAgent, expiration, null);
+    }
 
     /**
      * Credenciales firmadas según el esquema PlacetoPay.

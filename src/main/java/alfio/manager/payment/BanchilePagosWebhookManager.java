@@ -33,6 +33,7 @@ import alfio.model.transaction.banchile.BanchileWebhookPayload;
 import alfio.model.transaction.banchile.CreateSessionRequest;
 import alfio.model.transaction.banchile.CreateSessionRequest.Amount;
 import alfio.model.transaction.banchile.CreateSessionRequest.Auth;
+import alfio.model.transaction.banchile.CreateSessionRequest.Buyer;
 import alfio.model.transaction.banchile.CreateSessionRequest.Payment;
 import alfio.model.transaction.banchile.SessionResponse;
 import alfio.model.transaction.capabilities.PaymentInfo;
@@ -45,17 +46,25 @@ import alfio.util.ClockProvider;
 import alfio.util.Json;
 import alfio.util.MonetaryUtil;
 import alfio.util.RenderedTemplate;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.AllArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.text.Normalizer;
 import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.*;
+import java.util.regex.Pattern;
 
 import static alfio.manager.payment.PaymentManagerUtils.invalidateExistingTransactions;
 import static alfio.model.TicketReservation.TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT;
@@ -183,6 +192,58 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
 
     private static final String NOT_REPORTED = "no informado";
 
+    /** IP que se manda a Banchile cuando no hay una IP válida del comprador (el valor de siempre). */
+    static final String UNKNOWN_IP_ADDRESS = "0.0.0.0";
+
+    /** User-agent que se manda a Banchile cuando no hay uno del comprador (el valor de siempre). */
+    static final String DEFAULT_USER_AGENT = "alfio/banchile";
+
+    // Largos máximos de createSession según la referencia de la API de PlacetoPay, el motor de Banchile
+    // (docs.placetopay.dev/checkout/api/reference/session).
+    /** Person.name y Person.surname: 60. */
+    private static final int MAX_BUYER_NAME_LENGTH = 60;
+    /** Person.email: 80. Un correo más largo no se corta: sería otro correo. */
+    private static final int MAX_BUYER_EMAIL_LENGTH = 80;
+    /** userAgent: 255. */
+    private static final int MAX_USER_AGENT_LENGTH = 255;
+    /** payment.description: el esquema dice 255 y el texto "hasta 250 caracteres"; se usa el menor. */
+    private static final int MAX_DESCRIPTION_LENGTH = 250;
+    /** ipAddress admite 46; el texto de una IPv6 ocupa como máximo 45. */
+    private static final int MAX_IP_ADDRESS_LENGTH = 45;
+
+    /**
+     * Nombre o apellido del comprador: letras (con tildes, ñ, diéresis), espacios, punto, guion y
+     * apóstrofo. Con cualquier otro carácter no se manda el comprador, para que Banchile no rechace
+     * la sesión.
+     */
+    private static final Pattern BUYER_NAME = Pattern.compile("^\\p{L}[\\p{L}\\p{M} .'’-]*$");
+
+    /**
+     * Correo del comprador, con un formato conservador: ASCII, sin comillas, puntos seguidos ni en los
+     * extremos de la parte local, y un dominio con etiquetas válidas y un TLD alfabético.
+     */
+    private static final Pattern BUYER_EMAIL = Pattern.compile(
+        "^[A-Za-z0-9_%+-]+(?:\\.[A-Za-z0-9_%+-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$");
+
+    /** IPv4 en notación decimal con puntos, sin ceros a la izquierda. */
+    private static final Pattern IPV4 = Pattern.compile(
+        "^(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)$");
+
+    /** Caracteres de un literal IPv6 (sin zona: el "%eth0" de una dirección de enlace no va). */
+    private static final Pattern IPV6_CHARACTERS = Pattern.compile("^[0-9A-Fa-f:.]+$");
+
+    /** Caracteres de formato (invisibles, como el espacio de ancho cero): se eliminan. */
+    private static final Pattern FORMAT_CHARACTERS = Pattern.compile("\\p{Cf}");
+
+    /** Caracteres de control y separadores seguidos: se convierten en un espacio. */
+    private static final Pattern CONTROL_OR_SEPARATOR_RUNS = Pattern.compile("[\\p{Cc}\\p{Z}]+");
+
+    /**
+     * Caracteres que no van en la descripción: Banchile admite alfanuméricos, acentuados y símbolos
+     * comunes, así que se descarta todo lo que no sea letra, dígito, espacio o uno de estos símbolos.
+     */
+    private static final Pattern DESCRIPTION_DISCARDED_CHARACTERS = Pattern.compile("[^\\p{L}\\p{M}0-9 .,;:!?¡¿'\"()&/#%+*=@$_-]");
+
     private final ConfigurationManager configurationManager;
     private final BanchilePagosClient banchilePagosClient;
     private final TransactionRepository transactionRepository;
@@ -247,6 +308,14 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * <p>Persiste una transacción con status PENDING cuyo paymentId = requestId (int)
      * devuelto por Banchile.
      *
+     * <p>La sesión lleva el comprador de la reserva (Banchile lo precarga en su checkout), la IP y el
+     * navegador del comprador, {@code skipResult} (al terminar, Banchile vuelve directo al
+     * {@code returnUrl}) y la descripción {@code <evento> - reserva <ID corto>}. doPayment corre en el
+     * hilo del request que confirma la reserva ({@code ReservationApiV2Controller#confirmOverview} →
+     * {@code TicketReservationManager#performPayment}), así que la IP y el navegador salen de ese
+     * request. Ningún dato del comprador hace fallar la sesión: si falta o no es válido, va lo de
+     * antes (sin comprador, IP {@value #UNKNOWN_IP_ADDRESS}, user-agent {@value #DEFAULT_USER_AGENT}).
+     *
      * @param spec Especificación del pago
      * @return PaymentResult.redirect(processUrl) si tuvo éxito, PaymentResult.failed si no
      */
@@ -265,7 +334,7 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             // Construir el cuerpo de la request
             Auth auth = BanchilePagosClient.buildAuth(login, tranKey);
             String reference = merchantReference(reservationId);
-            String description = "Reserva " + reference;
+            String description = paymentDescription(purchaseContext, reservation, reference);
             String currency = purchaseContext.getCurrency();
             long totalCents = spec.getPriceWithVAT();
             // Banchile espera el total en unidades enteras (CLP no usa decimales)
@@ -289,17 +358,23 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
             // Expiración: 30 minutos desde ahora
             String expiration = purchaseContext.now(clockProvider).plusMinutes(30).toInstant().toString();
 
+            Buyer buyer = buyerOf(reservation);
+            HttpServletRequest buyerRequest = currentRequest();
+            String ipAddress = clientIpAddress(buyerRequest);
+            String userAgent = clientUserAgent(buyerRequest);
+
             CreateSessionRequest req = new CreateSessionRequest(
                 auth,
                 "es_CL",
-                null, // buyer opcional — no disponible en spec básica
+                buyer,
                 payment,
                 returnUrl,
                 cancelUrl,
                 notificationUrl,
-                "0.0.0.0", // IP no disponible en PaymentSpecification
-                "alfio/banchile",
-                expiration
+                ipAddress,
+                userAgent,
+                expiration,
+                Boolean.TRUE // skipResult: al terminar, Banchile vuelve directo al returnUrl
             );
 
             SessionResponse sessionResponse = banchilePagosClient.createSession(req, baseUrl);
@@ -331,7 +406,9 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                 Map.of()
             );
 
-            log.info("Sesión Banchile creada: requestId={} para reserva={}", requestIdStr, reservationId);
+            // sin datos personales en el log: solo si se mandaron
+            log.info("Sesión Banchile creada: requestId={} para reserva={} (comprador={}, IP del comprador={}, user-agent del comprador={})",
+                requestIdStr, reservationId, buyer != null, !UNKNOWN_IP_ADDRESS.equals(ipAddress), !DEFAULT_USER_AGENT.equals(userAgent));
             return PaymentResult.redirect(processUrl);
 
         } catch (BanchilePagosClient.BanchilePagosException e) {
@@ -1036,6 +1113,143 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      */
     private static String merchantReference(String reservationId) {
         return reservationId.replace("-", "");
+    }
+
+    /**
+     * Descripción del pago en Banchile: {@code <nombre del evento> - reserva <ID corto>}, con el ID
+     * corto de los correos de alf.io, para reconocer el pago en el portal. Sin el nombre del evento
+     * queda {@code Reserva <ID corto>}, y sin ID corto la de antes, {@code Reserva <referencia>}.
+     * Siempre tiene más de 4 caracteres, el mínimo que acepta Banchile.
+     *
+     * @param purchaseContext evento de la reserva
+     * @param reservation     reserva, o null si no se encontró
+     * @param reference       referencia del comercio que va en la sesión
+     * @return la descripción, de hasta {@value #MAX_DESCRIPTION_LENGTH} caracteres
+     */
+    private String paymentDescription(PurchaseContext purchaseContext, TicketReservation reservation, String reference) {
+        String shortId = reservation != null
+            ? StringUtils.trimToNull(configurationManager.getShortReservationID(purchaseContext, reservation))
+            : null;
+        if (shortId == null) {
+            return "Reserva " + reference;
+        }
+        String suffix = " - reserva " + shortId;
+        String eventName = singleLine(DESCRIPTION_DISCARDED_CHARACTERS.matcher(singleLine(purchaseContext.getDisplayName())).replaceAll(""));
+        eventName = cut(eventName, Math.max(0, MAX_DESCRIPTION_LENGTH - suffix.length()));
+        return eventName.isEmpty() ? "Reserva " + shortId : eventName + suffix;
+    }
+
+    /**
+     * Comprador para la sesión, con el nombre, el apellido y el correo de la reserva: Banchile los
+     * precarga en su checkout. Los nombres van en una línea y cortados en
+     * {@value #MAX_BUYER_NAME_LENGTH} caracteres.
+     *
+     * @param reservation reserva, o null si no se encontró
+     * @return el comprador, o null si falta el nombre, el apellido o el correo, si un nombre tiene
+     *         caracteres que no son de un nombre o si el correo no tiene un formato conservador o pasa
+     *         de {@value #MAX_BUYER_EMAIL_LENGTH} caracteres: la sesión se crea sin comprador
+     */
+    private static Buyer buyerOf(TicketReservation reservation) {
+        if (reservation == null) {
+            return null;
+        }
+        String name = cut(singleLine(reservation.getFirstName()), MAX_BUYER_NAME_LENGTH);
+        String surname = cut(singleLine(reservation.getLastName()), MAX_BUYER_NAME_LENGTH);
+        String email = StringUtils.strip(reservation.getEmail());
+        if (!BUYER_NAME.matcher(name).matches() || !BUYER_NAME.matcher(surname).matches()
+            || email == null || email.length() > MAX_BUYER_EMAIL_LENGTH || !BUYER_EMAIL.matcher(email).matches()) {
+            return null;
+        }
+        return new Buyer(name, surname, email, null, null, null);
+    }
+
+    /**
+     * El request HTTP del hilo actual, si lo hay: el que confirma la reserva cuando doPayment corre
+     * desde {@code ReservationApiV2Controller#confirmOverview}.
+     *
+     * @return el request, o null fuera de un request
+     */
+    private static HttpServletRequest currentRequest() {
+        return RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes attributes
+            ? attributes.getRequest()
+            : null;
+    }
+
+    /**
+     * IP del comprador para la sesión. Con {@code server.forward-headers-strategy=native}, Jetty
+     * entrega en {@code getRemoteAddr()} la IP del {@code X-Forwarded-For} que pone Caddy (una IPv6,
+     * entre corchetes). Solo se acepta una IP literal, que se valida sin resolver nombres.
+     *
+     * @param request request del comprador, o null
+     * @return la IP sin corchetes, o {@value #UNKNOWN_IP_ADDRESS} si no hay request o no es una IP
+     */
+    private static String clientIpAddress(HttpServletRequest request) {
+        String address = request != null ? StringUtils.strip(request.getRemoteAddr()) : null;
+        if (address != null && address.length() > 1 && address.startsWith("[") && address.endsWith("]")) {
+            address = address.substring(1, address.length() - 1);
+        }
+        return isIpLiteral(address) ? address : UNKNOWN_IP_ADDRESS;
+    }
+
+    /**
+     * true si el texto es una IPv4 o una IPv6 literal. No resuelve nombres: la IPv4 se valida con una
+     * expresión regular y la IPv6 (solo dígitos hexadecimales, ':' y '.') con el parser de
+     * {@link URI}, que valida la sintaxis del literal IPv6 de la RFC 2732 sin consultar el DNS.
+     */
+    private static boolean isIpLiteral(String address) {
+        if (StringUtils.isEmpty(address) || address.length() > MAX_IP_ADDRESS_LENGTH) {
+            return false;
+        }
+        if (IPV4.matcher(address).matches()) {
+            return true;
+        }
+        if (address.indexOf(':') < 0 || !IPV6_CHARACTERS.matcher(address).matches()) {
+            return false;
+        }
+        try {
+            return new URI("http://[" + address + "]/").getHost() != null;
+        } catch (URISyntaxException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Navegador del comprador para la sesión: su header {@code User-Agent} en una línea, sin
+     * caracteres de control y cortado en {@value #MAX_USER_AGENT_LENGTH} caracteres.
+     *
+     * @param request request del comprador, o null
+     * @return el user-agent, o {@value #DEFAULT_USER_AGENT} si no hay request o viene vacío
+     */
+    private static String clientUserAgent(HttpServletRequest request) {
+        String userAgent = request != null ? cut(singleLine(request.getHeader(HttpHeaders.USER_AGENT)), MAX_USER_AGENT_LENGTH) : "";
+        return userAgent.isEmpty() ? DEFAULT_USER_AGENT : userAgent;
+    }
+
+    /**
+     * El texto en una línea: en NFC (una letra y su tilde combinada quedan como un solo carácter), sin
+     * caracteres de formato, con los caracteres de control y los separadores convertidos en un
+     * espacio, y sin espacios repetidos ni en los extremos.
+     *
+     * @param value texto, o null
+     * @return el texto limpio; vacío si era null
+     */
+    private static String singleLine(String value) {
+        if (value == null) {
+            return "";
+        }
+        String text = FORMAT_CHARACTERS.matcher(Normalizer.normalize(value, Normalizer.Form.NFC)).replaceAll("");
+        return CONTROL_OR_SEPARATOR_RUNS.matcher(text).replaceAll(" ").strip();
+    }
+
+    /**
+     * Corta el texto en {@code maxLength} caracteres sin partir un carácter de dos unidades UTF-16
+     * (un emoji), y le quita los espacios que queden al final.
+     */
+    private static String cut(String text, int maxLength) {
+        if (text.codePointCount(0, text.length()) <= maxLength) {
+            return text;
+        }
+        return text.substring(0, text.offsetByCodePoints(0, maxLength)).strip();
     }
 
     /**
