@@ -25,9 +25,11 @@ import java.util.function.Supplier;
 
 /**
  * Single-flight en memoria para las verificaciones de pago que disparan las requests públicas:
- * el polling de {@code GET /api/v2/public/reservation/{id}/status} y el force-check de
- * {@code GET /api/v2/public/reservation/{id}/transaction/force-check}. A lo sumo una verificación
- * en curso por transacción de pago, y a lo sumo {@value #MAX_CHECKS_IN_FLIGHT} en curso en total.
+ * el polling de {@code GET /api/v2/public/reservation/{id}/status}, el force-check de
+ * {@code GET /api/v2/public/reservation/{id}/transaction/force-check} y el webhook de Banchile
+ * ({@code BanchileWebhookDispatcher}, también para la revisión de una sesión invalidada). A lo sumo
+ * una verificación en curso por transacción de pago, y a lo sumo {@value #MAX_CHECKS_IN_FLIGHT} en
+ * curso en total.
  *
  * <p>Sin esto, cada request entra a la transacción de {@code TicketReservationManager#forceTransactionCheck}
  * y espera el {@code FOR UPDATE} de la transacción de pago con una conexión del pool tomada, mientras
