@@ -35,6 +35,7 @@ import lombok.Getter;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 @AllArgsConstructor
@@ -99,7 +100,14 @@ public class ReservationInfo {
     @AllArgsConstructor
     @Getter
     public static class PaymentDetailsInfo {
-        private final String authorization;     // banchile_authorization (CUS)
+
+        /**
+         * Estados de la sesión Banchile con el pago autorizado: aprobado, o aprobado y después
+         * reembolsado. Con cualquier otro estado el código de autorización no se expone.
+         */
+        private static final Set<String> AUTHORIZED_STATUSES = Set.of("APPROVED", "REFUNDED");
+
+        private final String authorization;     // banchile_authorization (CUS), solo si la sesión quedó autorizada
         private final String paymentMethodName; // banchile_payment_method_name (ej. "Visa Credito")
         private final String issuer;            // banchile_issuer (banco emisor)
         private final String lastDigits;        // banchile_pf_lastDigits (4 últimos dígitos)
@@ -107,14 +115,23 @@ public class ReservationInfo {
         private final String receipt;           // banchile_receipt (n° voucher)
         private final String statusReason;      // banchile_status_reason (código rechazo)
         private final String statusMessage;     // banchile_status_message (texto motivo)
+        private final String status;            // banchile_status (estado de la sesión: APPROVED, REJECTED...)
 
         /**
          * Construye un PaymentDetailsInfo a partir de los campos {@code banchile_*}
          * persistidos en {@code b_transaction.metadata}. Devuelve {@code null} si la
          * metadata no contiene información Banchile (e.g. otra pasarela o reserva
          * gratuita).
+         *
+         * <p>El código de autorización solo va si la sesión quedó aprobada (o aprobada y después
+         * reembolsada): tras un rechazo de tarjeta, Banchile informa el intento rechazado con
+         * {@code authorization: "000000"}, que no es una autorización. Sin el estado de la sesión
+         * tampoco va, porque no se sabe si el pago se aprobó.
+         *
+         * @param metadata metadata de la transacción, puede ser null
+         * @return los detalles del pago, o null si la metadata no es de Banchile
          */
-        public static PaymentDetailsInfo fromMetadata(java.util.Map<String, String> metadata) {
+        public static PaymentDetailsInfo fromMetadata(Map<String, String> metadata) {
             if (metadata == null || metadata.isEmpty()) {
                 return null;
             }
@@ -122,15 +139,18 @@ public class ReservationInfo {
             if (!hasBanchile) {
                 return null;
             }
+            String status = metadata.get("banchile_status");
+            boolean authorized = status != null && AUTHORIZED_STATUSES.contains(status);
             return new PaymentDetailsInfo(
-                metadata.get("banchile_authorization"),
+                authorized ? metadata.get("banchile_authorization") : null,
                 metadata.get("banchile_payment_method_name"),
                 metadata.get("banchile_issuer"),
                 metadata.get("banchile_pf_lastDigits"),
                 metadata.get("banchile_franchise"),
                 metadata.get("banchile_receipt"),
                 metadata.get("banchile_status_reason"),
-                metadata.get("banchile_status_message")
+                metadata.get("banchile_status_message"),
+                status
             );
         }
     }

@@ -48,14 +48,15 @@ export class ReservationInfo {
 }
 
 export interface PaymentDetailsInfo {
-  authorization?: string;     // banchile_authorization (CUS)
+  authorization?: string;     // banchile_authorization (CUS), solo con el pago aprobado
   paymentMethodName?: string; // ej. "Visa Credito"
   issuer?: string;            // banco emisor
   lastDigits?: string;        // 4 últimos dígitos
   franchise?: string;         // ej. "VISA"
   receipt?: string;           // n° voucher
-  statusReason?: string;      // código de rechazo (ej. "05")
+  statusReason?: string;      // código de rechazo (ej. "05"; "?C" cancelado, "EX" vencido)
   statusMessage?: string;     // texto del motivo
+  status?: string;            // estado de la sesión Banchile (APPROVED, REJECTED...)
 }
 
 export interface AdditionalServiceWithData {

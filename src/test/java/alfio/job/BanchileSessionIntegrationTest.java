@@ -333,6 +333,33 @@ class BanchileSessionIntegrationTest {
     }
 
     /**
+     * El banco rechaza la tarjeta: la sesión queda REJECTED y el intento rechazado trae
+     * {@code authorization: "000000"}, como vio el QA en el sandbox el 15-oct. Después del flujo de
+     * pago fallido, el resumen recibe el estado de la sesión y el motivo, para mostrar el aviso, pero
+     * no ese "código de autorización", que antes ocultaba el aviso.
+     */
+    @Test
+    void afterARejectedCardTheOverviewGetsTheRejectionWithoutAnAuthorization() {
+        var event = createEvent();
+        var now = Instant.now();
+        var reservationId = reservationOf(event, Date.from(now.plus(Duration.ofMinutes(20))));
+        payWithBanchileAt(event, reservationId, 52101, now.minus(Duration.ofMinutes(2)));
+        banchileResponds(52101, rejectedCard(52101));
+
+        reservationApiV2Controller.getReservationStatus(reservationId);
+
+        assertEquals(PENDING, reservationStatus(reservationId), "con la reserva vigente, el rechazo la devuelve a PENDING");
+        var response = reservationApiV2Controller.getReservationInfo(reservationId, null);
+        assertNotNull(response.getBody());
+        var details = response.getBody().getPaymentDetails();
+        assertNotNull(details, "el resumen debía recibir los detalles del intento fallido");
+        assertEquals("REJECTED", details.getStatus());
+        assertEquals("51", details.getStatusReason());
+        assertEquals("Fondos insuficientes", details.getStatusMessage());
+        assertNull(details.getAuthorization(), "el 000000 del intento rechazado no es un código de autorización");
+    }
+
+    /**
      * Si Banchile no crea la sesión, la reserva no cambia: ni su validez ni su estado.
      */
     @Test
@@ -581,6 +608,22 @@ class BanchileSessionIntegrationTest {
             {"requestId": %d,
              "status": {"status": "REJECTED", "reason": "%s", "message": "%s", "date": "2026-11-28T18:40:00-03:00"}}
             """.formatted(requestId, reason, message);
+    }
+
+    /**
+     * querySession de una tarjeta rechazada por el banco: la sesión REJECTED con el motivo del banco y
+     * el intento rechazado con {@code authorization: "000000"}.
+     */
+    private static String rejectedCard(int requestId) {
+        return """
+            {"requestId": %d,
+             "status": {"status": "REJECTED", "reason": "51", "message": "Fondos insuficientes", "date": "2026-11-28T18:20:00-03:00"},
+             "payment": [{"status": {"status": "REJECTED", "reason": "51", "message": "Fondos insuficientes", "date": "2026-11-28T18:19:50-03:00"},
+                          "internalReference": %d, "paymentMethod": "visa", "paymentMethodName": "Visa", "issuerName": "BANCO DE PRUEBA",
+                          "amount": {"from": {"total": 20, "currency": "CHF"}, "to": {"total": 20, "currency": "CHF"}, "factor": 1},
+                          "authorization": "000000", "reference": "REF%d", "receipt": null, "franchise": "visa", "refunded": false,
+                          "processorFields": [{"keyword": "lastDigits", "value": "0016", "displayOn": "none"}]}]}
+            """.formatted(requestId, 800000 + requestId, requestId);
     }
 
     private static void banchileCreatesTheSession(int requestId) {
