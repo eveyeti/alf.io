@@ -1617,7 +1617,9 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * Intento de pago del que se toman los detalles (recibo, autorización, medio de pago...).
      * Una sesión puede tener varios intentos (reintentos tras un rechazo): se prefiere el
      * APPROVED; si no hay, el reembolsado (Banchile puede informarlo con estado REFUNDED en vez
-     * de APPROVED); si tampoco hay, el primero disponible (útil para rechazos).
+     * de APPROVED); si tampoco hay, el primero disponible (útil para rechazos). Se asume que
+     * Banchile, como PlacetoPay, lista primero el intento más reciente, así que en un rechazo es el
+     * último intento; no está verificado con una sesión real de varios intentos.
      *
      * @param remoteSession respuesta de querySession, puede ser null
      * @return el intento elegido, o null si la sesión no tiene intentos de pago
@@ -1644,6 +1646,11 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * y agrega los campos extraídos del payload del webhook + la respuesta de
      * {@code querySession} (ground truth remoto). Los detalles del pago salen del intento que
      * elige {@link #selectPaymentDetails}: el APPROVED, si no el reembolsado, si no el primero.
+     *
+     * <p>El estado, la razón y el mensaje de ese intento van aparte de los de la sesión
+     * ({@code banchile_attempt_*}): con una tarjeta rechazada, Banchile deja la sesión abierta para
+     * reintentar y, si el comprador vuelve al comercio, la cierra REJECTED con razón ?C ("cancelada
+     * por el usuario"), aunque lo que pasó es que el banco rechazó el intento (QA del 15-oct).
      *
      * <p>Solo invocar en estados finales (COMPLETE / FAILED). En PENDING, preservar
      * intacto el metadata actual.
@@ -1697,6 +1704,12 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                 metadata.put("banchile_receipt", pd.receipt());
             if (Boolean.TRUE.equals(pd.refunded()))
                 metadata.put("banchile_refunded", "true");
+            if (pd.status() != null) {
+                var attempt = pd.status();
+                if (attempt.status() != null)  metadata.put("banchile_attempt_status", attempt.status());
+                if (attempt.reason() != null)  metadata.put("banchile_attempt_reason", attempt.reason());
+                if (attempt.message() != null) metadata.put("banchile_attempt_message", attempt.message());
+            }
 
             // Aplanar processorFields[] como banchile_pf_<keyword> = <value>
             // (solo cuando value es String — otros tipos se omiten para mantener Map<String,String>)

@@ -50,6 +50,43 @@ class PaymentDetailsInfoTest {
         assertNull(details.getAuthorization(), "un intento rechazado no tiene código de autorización");
     }
 
+    /**
+     * QA del 15-oct en el sandbox: el banco rechazó la tarjeta y el comprador volvió al comercio, así
+     * que la sesión se cerró con ?C. El último intento va aparte, para que el resumen muestre el
+     * rechazo del banco y no "cancelaste"; su "000000" tampoco se expone.
+     */
+    @Test
+    void theLastPaymentAttemptIsExposedWithoutItsAuthorization() {
+        var details = PaymentDetailsInfo.fromMetadata(metadata(
+            "banchile_status", "REJECTED",
+            "banchile_status_reason", "?C",
+            "banchile_status_message", "La petición ha sido cancelada por el usuario",
+            "banchile_attempt_status", "REJECTED",
+            "banchile_attempt_reason", "?2",
+            "banchile_attempt_message", "Transacción declinada por políticas de control de riesgo",
+            "banchile_authorization", "000000"));
+
+        assertNotNull(details);
+        assertEquals("?C", details.getStatusReason());
+        assertEquals("REJECTED", details.getAttemptStatus());
+        assertEquals("?2", details.getAttemptReason());
+        assertEquals("Transacción declinada por políticas de control de riesgo", details.getAttemptMessage());
+        assertNull(details.getAuthorization());
+    }
+
+    @Test
+    void withoutPaymentAttemptsTheAttemptIsEmpty() {
+        var details = PaymentDetailsInfo.fromMetadata(metadata(
+            "banchile_status", "REJECTED",
+            "banchile_status_reason", "EX",
+            "banchile_status_message", "La petición ha expirado"));
+
+        assertNotNull(details);
+        assertNull(details.getAttemptStatus());
+        assertNull(details.getAttemptReason());
+        assertNull(details.getAttemptMessage());
+    }
+
     @Test
     void aSessionCancelledByTheBuyerKeepsItsStatusAndReason() {
         var details = PaymentDetailsInfo.fromMetadata(metadata(

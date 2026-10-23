@@ -148,4 +148,77 @@ describe('BanchileFailedPaymentNoticeComponent', () => {
       expect(text(notice.querySelector('.failed-attempt-bank-detail'))).toBe('Message from the bank: Fondos insuficientes');
     });
   });
+
+  /**
+   * Con una tarjeta rechazada Banchile deja la sesión abierta; si el comprador vuelve al comercio, la
+   * cierra con ?C, y si no hace nada, vence (EX). Lo que pasó fue el rechazo del banco: manda el
+   * último intento, no la razón de la sesión (QA del 15-oct, sesiones 4406 y 4412).
+   */
+  describe('el último intento manda sobre la razón de la sesión', () => {
+    const RISK_REJECTION = 'Transacción declinada por políticas de control de riesgo';
+
+    it('rechazo del banco y después "Volver al comercio" (?C): el texto del rechazo, con el mensaje del intento', () => {
+      const notice = render({
+        status: 'REJECTED', statusReason: '?C', statusMessage: 'La petición ha sido cancelada por el usuario',
+        attemptStatus: 'REJECTED', attemptReason: '?2', attemptMessage: RISK_REJECTION
+      });
+
+      expect(text(notice.querySelector('.failed-attempt-text'))).toBe(SPANISH[KEY + 'rejected']);
+      expect(text(notice.querySelector('.failed-attempt-bank-detail'))).toBe('Detalle del banco: ' + RISK_REJECTION);
+      expect(text(notice)).not.toContain('?2');
+      expect(text(notice)).not.toContain('cancelada');
+    });
+
+    it('rechazo del banco y después la sesión vencida (EX): el texto del rechazo', () => {
+      const notice = render({
+        status: 'REJECTED', statusReason: 'EX', statusMessage: 'La petición ha expirado',
+        attemptStatus: 'REJECTED', attemptReason: '?2', attemptMessage: RISK_REJECTION
+      });
+
+      expect(text(notice.querySelector('.failed-attempt-text'))).toBe(SPANISH[KEY + 'rejected']);
+      expect(text(notice.querySelector('.failed-attempt-bank-detail'))).toBe('Detalle del banco: ' + RISK_REJECTION);
+    });
+
+    it('intento rechazado sin mensaje del banco: el texto del rechazo, sin la línea del banco', () => {
+      const notice = render({
+        status: 'REJECTED', statusReason: '?C', statusMessage: 'La petición ha sido cancelada por el usuario',
+        attemptStatus: 'REJECTED', attemptReason: '05'
+      });
+
+      expect(text(notice.querySelector('.failed-attempt-text'))).toBe(SPANISH[KEY + 'rejected']);
+      expect(notice.querySelector('.failed-attempt-bank-detail')).toBeNull();
+    });
+
+    it('sin intentos y cancelado (?C): el texto de la cancelación', () => {
+      const notice = render({status: 'REJECTED', statusReason: '?C', statusMessage: 'La petición ha sido cancelada por el usuario'});
+
+      expect(text(notice)).toBe(SPANISH[KEY + 'cancelled']);
+    });
+
+    it('sin intentos y vencido (EX): el texto del vencimiento', () => {
+      const notice = render({status: 'REJECTED', statusReason: 'EX', statusMessage: 'La petición ha expirado'});
+
+      expect(text(notice)).toBe(SPANISH[KEY + 'expired']);
+    });
+
+    it('un intento sin respuesta del banco y después la sesión vencida: el texto del vencimiento', () => {
+      const notice = render({
+        status: 'REJECTED', statusReason: 'EX', statusMessage: 'La petición ha expirado',
+        attemptStatus: 'PENDING', attemptReason: 'PT', attemptMessage: 'La transacción se encuentra pendiente'
+      });
+
+      expect(text(notice)).toBe(SPANISH[KEY + 'expired']);
+    });
+
+    it('en inglés, el mensaje del intento va en la línea del banco', () => {
+      translate.use('en');
+      const notice = render({
+        status: 'REJECTED', statusReason: '?C', statusMessage: 'La petición ha sido cancelada por el usuario',
+        attemptStatus: 'REJECTED', attemptReason: '?2', attemptMessage: RISK_REJECTION
+      });
+
+      expect(text(notice.querySelector('.failed-attempt-text'))).toBe(ENGLISH[KEY + 'rejected']);
+      expect(text(notice.querySelector('.failed-attempt-bank-detail'))).toBe('Message from the bank: ' + RISK_REJECTION);
+    });
+  });
 });

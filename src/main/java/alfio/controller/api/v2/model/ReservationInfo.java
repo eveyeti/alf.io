@@ -116,6 +116,9 @@ public class ReservationInfo {
         private final String statusReason;      // banchile_status_reason (código rechazo)
         private final String statusMessage;     // banchile_status_message (texto motivo)
         private final String status;            // banchile_status (estado de la sesión: APPROVED, REJECTED...)
+        private final String attemptStatus;     // banchile_attempt_status (estado del último intento de pago)
+        private final String attemptReason;     // banchile_attempt_reason (razón del último intento, ej. "?2")
+        private final String attemptMessage;    // banchile_attempt_message (mensaje del banco para ese intento)
 
         /**
          * Construye un PaymentDetailsInfo a partir de los campos {@code banchile_*}
@@ -127,6 +130,10 @@ public class ReservationInfo {
          * reembolsada): tras un rechazo de tarjeta, Banchile informa el intento rechazado con
          * {@code authorization: "000000"}, que no es una autorización. Sin el estado de la sesión
          * tampoco va, porque no se sabe si el pago se aprobó.
+         *
+         * <p>El último intento de pago va aparte del estado de la sesión: con una tarjeta rechazada
+         * Banchile deja la sesión abierta para reintentar y, si el comprador vuelve al comercio, la
+         * cierra con razón ?C ("cancelada por el usuario"). El intento dice que el banco la rechazó.
          *
          * @param metadata metadata de la transacción, puede ser null
          * @return los detalles del pago, o null si la metadata no es de Banchile
@@ -150,7 +157,10 @@ public class ReservationInfo {
                 metadata.get("banchile_receipt"),
                 metadata.get("banchile_status_reason"),
                 metadata.get("banchile_status_message"),
-                status
+                status,
+                metadata.get("banchile_attempt_status"),
+                metadata.get("banchile_attempt_reason"),
+                metadata.get("banchile_attempt_message")
             );
         }
     }

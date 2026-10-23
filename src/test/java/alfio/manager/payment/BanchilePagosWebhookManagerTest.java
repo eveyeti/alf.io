@@ -442,6 +442,83 @@ class BanchilePagosWebhookManagerTest {
     }
 
     // =========================================================================
+    // El último intento de pago queda en la metadata
+    // =========================================================================
+
+    /**
+     * El caso de las sesiones 4406 y 4412 del QA del 15-oct en el sandbox: Banchile rechaza la tarjeta
+     * ("?2 Transacción declinada por políticas de control de riesgo") y deja la sesión abierta para
+     * reintentar; el comprador vuelve al comercio y la sesión se cierra REJECTED con razón ?C. La
+     * sesión dice "cancelada", pero lo que pasó es el rechazo del banco: el intento se guarda aparte
+     * (banchile_attempt_*) para que el resumen muestre el rechazo.
+     */
+    @Test
+    void theLastPaymentAttemptIsPersistedWhenTheBuyerLeavesAfterARejectedCard() {
+        var reservation = buildTicketReservation();
+        when(ticketReservationRepository.findOptionalStatusAndValidationById(RESERVATION_ID))
+            .thenReturn(Optional.of(new TicketReservationStatusAndValidation(TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT, true)));
+        var rejectedAttempt = new SessionResponse.PaymentDetails(
+            RESERVATION_ID,
+            new alfio.model.transaction.banchile.CreateSessionRequest.Amount("CLP", 10000L),
+            null,
+            new SessionResponse.Status("REJECTED", "?2", "Transacción declinada por políticas de control de riesgo",
+                "2026-10-15T12:31:40-03:00"),
+            1301, "visa", "Visa", "BANCO DE PRUEBA",
+            "000000",
+            "visa", false,
+            List.of(new SessionResponse.ProcessorField("lastDigits", "0016", "none"))
+        );
+        when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL))).thenReturn(new SessionResponse(
+            new SessionResponse.Status("REJECTED", "?C", "La petición ha sido cancelada por el usuario", "2026-10-15T12:32:05-03:00"),
+            REQUEST_ID_INT, null, List.of(rejectedAttempt)));
+
+        var result = manager.forceTransactionCheck(reservation, transaction, paymentContext);
+
+        assertEquals(PaymentWebhookResult.Type.FAILED, result.getType());
+        var metadata = closedTransactionMetadata(Transaction.Status.FAILED);
+        assertEquals("REJECTED", metadata.get("banchile_status"));
+        assertEquals("?C", metadata.get("banchile_status_reason"));
+        assertEquals("La petición ha sido cancelada por el usuario", metadata.get("banchile_status_message"));
+        assertEquals("REJECTED", metadata.get("banchile_attempt_status"));
+        assertEquals("?2", metadata.get("banchile_attempt_reason"));
+        assertEquals("Transacción declinada por políticas de control de riesgo", metadata.get("banchile_attempt_message"));
+    }
+
+    /**
+     * Sesión vencida sin ningún intento de tarjeta (39 de las 51 sesiones fallidas de "Ya no te
+     * gusto"): no hay intento que guardar.
+     */
+    @Test
+    void anExpiredSessionWithoutPaymentAttemptsHasNoAttemptInTheMetadata() {
+        var reservation = buildTicketReservation();
+        when(ticketReservationRepository.findOptionalStatusAndValidationById(RESERVATION_ID))
+            .thenReturn(Optional.of(new TicketReservationStatusAndValidation(TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT, true)));
+        when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL))).thenReturn(new SessionResponse(
+            new SessionResponse.Status("REJECTED", "EX", "La petición ha expirado", "2026-10-15T13:00:00-03:00"),
+            REQUEST_ID_INT, null, null));
+
+        var result = manager.forceTransactionCheck(reservation, transaction, paymentContext);
+
+        assertEquals(PaymentWebhookResult.Type.FAILED, result.getType());
+        var metadata = closedTransactionMetadata(Transaction.Status.FAILED);
+        assertEquals("EX", metadata.get("banchile_status_reason"));
+        assertNull(metadata.get("banchile_attempt_status"));
+        assertNull(metadata.get("banchile_attempt_reason"));
+        assertNull(metadata.get("banchile_attempt_message"));
+    }
+
+    /**
+     * La metadata con que se cerró la transacción.
+     */
+    private Map<String, String> closedTransactionMetadata(Transaction.Status status) {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> metadataCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(transactionRepository).update(eq(TRANSACTION_ID), eq(REQUEST_ID_STR), eq(REQUEST_ID_STR), any(),
+            eq(0L), eq(0L), eq(status), metadataCaptor.capture());
+        return metadataCaptor.getValue();
+    }
+
+    // =========================================================================
     // T5 — processWebhook con firma inválida rechaza sin confirmar
     // =========================================================================
 

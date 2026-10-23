@@ -57,6 +57,9 @@ export interface PaymentDetailsInfo {
   statusReason?: string;      // código de rechazo (ej. "05"; "?C" cancelado, "EX" vencido)
   statusMessage?: string;     // texto del motivo
   status?: string;            // estado de la sesión Banchile (APPROVED, REJECTED...)
+  attemptStatus?: string;     // estado del último intento de pago (REJECTED si el banco lo rechazó)
+  attemptReason?: string;     // razón del último intento (ej. "?2")
+  attemptMessage?: string;    // mensaje del banco para ese intento
 }
 
 export interface AdditionalServiceWithData {

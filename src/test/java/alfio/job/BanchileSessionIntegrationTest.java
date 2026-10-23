@@ -452,6 +452,34 @@ class BanchileSessionIntegrationTest {
     }
 
     /**
+     * Lo que vio el QA del 15-oct en el sandbox (sesiones 4406 y 4412): Banchile rechaza la tarjeta y
+     * deja la sesión abierta para reintentar; el comprador aprieta "Volver al comercio" y la sesión se
+     * cierra REJECTED con razón ?C ("cancelada por el usuario"). El resumen recibe, además del estado
+     * de la sesión, el último intento: rechazado por el banco, con su motivo. Así puede decir que el
+     * banco no aprobó el pago, y no que el comprador lo canceló.
+     */
+    @Test
+    void aCardRejectedAndThenLeftByTheBuyerReachesTheOverviewWithTheRejectedAttempt() {
+        var event = createEvent();
+        var now = Instant.now();
+        var reservationId = reservationOf(event, Date.from(now.plus(Duration.ofMinutes(20))));
+        payWithBanchileAt(event, reservationId, 52102, now.minus(Duration.ofMinutes(2)));
+        banchileResponds(52102, rejectedCardThenLeftByTheBuyer(52102));
+
+        reservationApiV2Controller.getReservationStatus(reservationId);
+
+        assertEquals(PENDING, reservationStatus(reservationId), "con la reserva vigente, el pago fallido la devuelve a PENDING");
+        var details = reservationApiV2Controller.getReservationInfo(reservationId, null).getBody().getPaymentDetails();
+        assertNotNull(details);
+        assertEquals("REJECTED", details.getStatus());
+        assertEquals("?C", details.getStatusReason());
+        assertEquals("REJECTED", details.getAttemptStatus());
+        assertEquals("?2", details.getAttemptReason());
+        assertEquals("Transacción declinada por políticas de control de riesgo", details.getAttemptMessage());
+        assertNull(details.getAuthorization());
+    }
+
+    /**
      * "Procesando pago" explica qué hacer cuando el pago con Banchile tarda: para eso necesita saber
      * que el pago en curso es de Banchile. Banchile no usa el token de pago de alf.io y la reserva no
      * guarda el medio de pago hasta confirmarse, así que el proveedor sale de la transacción PENDING.
@@ -840,6 +868,23 @@ class BanchileSessionIntegrationTest {
     /** Cuántas veces alf.io consultó la sesión en el Banchile falso (querySession). */
     private static int queriesTo(int requestId) {
         return banchile.retrieveRecordedRequests(request().withMethod("POST").withPath("/api/session/" + requestId)).length;
+    }
+
+    /**
+     * querySession de una tarjeta rechazada por el banco cuando el comprador después vuelve al
+     * comercio, con los textos del QA del 15-oct: la sesión REJECTED con razón ?C y el intento
+     * rechazado con razón ?2 y {@code authorization: "000000"}.
+     */
+    private static String rejectedCardThenLeftByTheBuyer(int requestId) {
+        return """
+            {"requestId": %d,
+             "status": {"status": "REJECTED", "reason": "?C", "message": "La petición ha sido cancelada por el usuario", "date": "2026-10-15T12:32:05-03:00"},
+             "payment": [{"status": {"status": "REJECTED", "reason": "?2", "message": "Transacción declinada por políticas de control de riesgo", "date": "2026-10-15T12:31:40-03:00"},
+                          "internalReference": %d, "paymentMethod": "visa", "paymentMethodName": "Visa", "issuerName": "BANCO DE PRUEBA",
+                          "amount": {"from": {"total": 20, "currency": "CHF"}, "to": {"total": 20, "currency": "CHF"}, "factor": 1},
+                          "authorization": "000000", "reference": "REF%d", "receipt": null, "franchise": "visa", "refunded": false,
+                          "processorFields": [{"keyword": "lastDigits", "value": "0016", "displayOn": "none"}]}]}
+            """.formatted(requestId, 800000 + requestId, requestId);
     }
 
     /**

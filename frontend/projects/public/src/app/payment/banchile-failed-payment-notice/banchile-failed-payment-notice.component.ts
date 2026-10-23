@@ -27,6 +27,11 @@ export type FailedAttemptReason = 'rejected' | 'cancelled' | 'expired';
  * El texto sale de las traducciones (reservation-page.payment.banchile.failed-attempt.*), según el
  * motivo: rechazo del banco, cancelación del comprador (?C) o vencimiento (EX). Nunca muestra el
  * código técnico; en el rechazo del banco agrega, en texto secundario, el mensaje que informa Banchile.
+ *
+ * Manda el último intento de pago: con una tarjeta rechazada, Banchile deja la sesión abierta para
+ * reintentar y, si el comprador vuelve al comercio, la cierra con ?C (o vence, EX). Si el último
+ * intento fue rechazado, el aviso es el del rechazo del banco, con el mensaje de ese intento; solo sin
+ * un intento rechazado cuenta la razón de la sesión.
  */
 @Component({
   selector: 'app-banchile-failed-payment-notice',
@@ -43,10 +48,18 @@ export class BanchileFailedPaymentNoticeComponent {
     return this.paymentDetails != null && FAILED_STATUSES.includes(this.paymentDetails.status);
   }
 
+  /** true si el banco rechazó el último intento de pago de la sesión. */
+  private get attemptRejected(): boolean {
+    return this.paymentDetails?.attemptStatus === 'REJECTED';
+  }
+
   /** Motivo del intento fallido; null si el último intento no falló. */
   get reason(): FailedAttemptReason | null {
     if (!this.failed) {
       return null;
+    }
+    if (this.attemptRejected) {
+      return 'rejected';
     }
     if (this.paymentDetails.status === 'PARTIAL_EXPIRED' || this.paymentDetails.statusReason === EXPIRED) {
       return 'expired';
@@ -64,9 +77,15 @@ export class BanchileFailedPaymentNoticeComponent {
     return KEY_PREFIX + 'bank-detail';
   }
 
-  /** Mensaje que informa Banchile, solo para el rechazo del banco y sin el código; null si no hay. */
+  /**
+   * Mensaje que informa Banchile, solo para el rechazo del banco y sin el código: el del intento
+   * rechazado, o, sin intentos, el de la sesión; null si no hay.
+   */
   get bankDetail(): string | null {
-    const message = this.paymentDetails?.statusMessage?.trim();
-    return this.reason === 'rejected' && message ? message : null;
+    if (this.reason !== 'rejected') {
+      return null;
+    }
+    const message = (this.attemptRejected ? this.paymentDetails.attemptMessage : this.paymentDetails.statusMessage)?.trim();
+    return message ? message : null;
   }
 }
