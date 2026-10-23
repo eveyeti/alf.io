@@ -135,6 +135,12 @@ class BanchileSessionIntegrationTest {
     private static final String RETRY_EMAIL = "You can safely retry by opening the reservation page at";
     /** Correo de pago fallido con la reserva anulada (email-transaction-failed.cancelled, en inglés). */
     private static final String CANCELLED_EMAIL = "The reservation has been cancelled";
+    /** Plantilla del organizador para el pago fallido (charge-failed-organizer-txt.ms). */
+    private static final String ORGANIZER_TEMPLATE = "Payment failed for reservation";
+    /** Final de la plantilla del organizador cuando el pago fallido anuló la reserva. */
+    private static final String ORGANIZER_TEMPLATE_CANCELLED = "The reservation has been automatically cancelled.";
+    /** Email de la organización que crea {@link IntegrationTestUtil#initEvent}: el de las alertas del cron. */
+    private static final String ORGANIZATION_EMAIL = "email@example.com";
 
     private static ClientAndServer banchile;
 
@@ -335,6 +341,87 @@ class BanchileSessionIntegrationTest {
         assertTrue(ticketReservationRepository.findOptionalReservationById(reservationId).isEmpty(),
             "el flujo de pago fallido anula la reserva vencida");
         assertTrue(buyerEmails(event).stream().anyMatch(m -> m.contains(CANCELLED_EMAIL)), String.valueOf(buyerEmails(event)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Correos del pago fallido: cada plantilla a quien corresponde
+    // -------------------------------------------------------------------------
+
+    /**
+     * El pago fallido anula la reserva vencida: el comprador recibe solo su correo y la plantilla del
+     * organizador, en inglés y técnica ("CREDIT_CARD: Payment failed ... automatically cancelled"),
+     * le llega a la organización, al mismo correo que las alertas del cron. Antes le llegaban las dos
+     * al comprador (bug de alf.io).
+     */
+    @Test
+    void whenTheFailedPaymentCancelsTheReservationTheOrganizerTemplateGoesToTheOrganization() {
+        var event = createEvent();
+        var now = Instant.now();
+        var reservationId = reservationOf(event, Date.from(now.minus(Duration.ofMinutes(27))));
+        payWithBanchileAt(event, reservationId, 55001, now.minus(Duration.ofMinutes(47)));
+        banchileResponds(55001, rejected(55001, "EX", "La petición ha expirado"));
+
+        cron().reconcilePendingBanchileTransactions();
+
+        var buyerEmails = buyerEmails(event);
+        assertEquals(1, buyerEmails.size(), "el comprador recibe solo su correo: " + buyerEmails);
+        assertTrue(buyerEmails.get(0).contains(CANCELLED_EMAIL), buyerEmails.get(0));
+        assertFalse(buyerEmails.get(0).contains(ORGANIZER_TEMPLATE), buyerEmails.get(0));
+        var organizerEmails = emailsTo(event, ORGANIZATION_EMAIL);
+        assertEquals(1, organizerEmails.size(), "la organización recibe la plantilla del organizador: " + organizerEmails);
+        assertTrue(organizerEmails.get(0).startsWith("CREDIT_CARD: " + ORGANIZER_TEMPLATE), organizerEmails.get(0));
+        assertTrue(organizerEmails.get(0).contains(ORGANIZER_TEMPLATE_CANCELLED), organizerEmails.get(0));
+    }
+
+    /**
+     * Con NOTIFY_ALL_FAILED_PAYMENT_ATTEMPTS, cada pago fallido avisa a la organización aunque la
+     * reserva siga vigente: la plantilla del organizador va a la organización y el comprador recibe
+     * solo el correo para reintentar.
+     */
+    @Test
+    void withNotificationsForAllFailedAttemptsTheOrganizationGetsItsTemplateAndTheBuyerOnlyTheRetry() {
+        configurationRepository.insert(NOTIFY_ALL_FAILED_PAYMENT_ATTEMPTS.name(), "true", "");
+        var event = createEvent();
+        var reservationId = reservationWithAnExpiredBanchileSession(event, 55002);
+
+        cron().reconcilePendingBanchileTransactions();
+
+        assertTheBuyerCanRetry(event, reservationId);
+        var buyerEmails = buyerEmails(event);
+        assertEquals(1, buyerEmails.size(), "el comprador recibe solo su correo: " + buyerEmails);
+        assertFalse(buyerEmails.get(0).contains(ORGANIZER_TEMPLATE), buyerEmails.get(0));
+        var organizerEmails = emailsTo(event, ORGANIZATION_EMAIL);
+        assertEquals(1, organizerEmails.size(), "la organización recibe la plantilla del organizador: " + organizerEmails);
+        assertTrue(organizerEmails.get(0).startsWith("CREDIT_CARD: " + ORGANIZER_TEMPLATE), organizerEmails.get(0));
+        assertFalse(organizerEmails.get(0).contains(ORGANIZER_TEMPLATE_CANCELLED), "la reserva no se anuló: " + organizerEmails.get(0));
+    }
+
+    /**
+     * Sin NOTIFY_ALL_FAILED_PAYMENT_ATTEMPTS (el valor por defecto), un pago fallido con la reserva
+     * vigente no escribe a la organización.
+     */
+    @Test
+    void byDefaultAFailedAttemptWithTheReservationStillValidDoesNotWriteToTheOrganization() {
+        var event = createEvent();
+        var reservationId = reservationWithAnExpiredBanchileSession(event, 55003);
+
+        cron().reconcilePendingBanchileTransactions();
+
+        assertTheBuyerCanRetry(event, reservationId);
+        assertEquals(1, buyerEmails(event).size(), String.valueOf(buyerEmails(event)));
+        assertTrue(emailsTo(event, ORGANIZATION_EMAIL).isEmpty(), String.valueOf(emailsTo(event, ORGANIZATION_EMAIL)));
+    }
+
+    /**
+     * Reserva mandada a pagar hace 42 minutos cuya sesión de Banchile venció hace 12 sin pago: sigue
+     * vigente (vence 15 minutos después de la sesión), así que el pago fallido permite reintentar.
+     */
+    private String reservationWithAnExpiredBanchileSession(Event event, int requestId) {
+        var now = Instant.now();
+        var reservationId = reservationOf(event, Date.from(now.minus(Duration.ofMinutes(22))));
+        payWithBanchileAt(event, reservationId, requestId, now.minus(Duration.ofMinutes(42)));
+        banchileResponds(requestId, rejected(requestId, "EX", "La petición ha expirado"));
+        return reservationId;
     }
 
     /**
@@ -700,8 +787,12 @@ class BanchileSessionIntegrationTest {
     }
 
     private List<String> buyerEmails(Event event) {
+        return emailsTo(event, BUYER_EMAIL);
+    }
+
+    private List<String> emailsTo(Event event, String recipient) {
         return jdbc.queryForList("select message from email_message where event_id = :eventId and recipient = :recipient order by id",
-            Map.of("eventId", event.getId(), "recipient", BUYER_EMAIL), String.class);
+            Map.of("eventId", event.getId(), "recipient", recipient), String.class);
     }
 
     /**

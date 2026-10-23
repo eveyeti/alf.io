@@ -1937,11 +1937,19 @@ public class TicketReservationManager {
         return status != EXTERNAL_PROCESSING_PAYMENT && status != WAITING_EXTERNAL_CONFIRMATION;
     }
 
+    /**
+     * Avisa un pago fallido: al comprador, siempre, con CHARGE_ATTEMPT_FAILED_EMAIL (reintentar o
+     * reserva anulada); y a la organización, con CHARGE_ATTEMPT_FAILED_EMAIL_FOR_ORGANIZER, si se anuló
+     * la reserva o si NOTIFY_ALL_FAILED_PAYMENT_ATTEMPTS está activo. La plantilla del organizador va
+     * al correo de la organización, el mismo de las alertas de Banchile: alf.io se la mandaba al
+     * comprador, que recibía además un correo técnico y en inglés.
+     */
     private void sendTransactionFailedEmail(PurchaseContext purchaseContext, TicketReservation reservation, PaymentMethod paymentMethod, PaymentWebhookResult paymentWebhookResult, boolean cancelReservation) {
         var shortReservationID = configurationManager.getShortReservationID(purchaseContext, reservation);
         var messageSource = messageSourceManager.getMessageSourceFor(purchaseContext);
+        var organization = organizationRepository.getById(purchaseContext.getOrganizationId());
         Map<String, Object> model = Map.of(
-            ORGANIZATION, organizationRepository.getById(purchaseContext.getOrganizationId()),
+            ORGANIZATION, organization,
         "reservationCancelled", cancelReservation,
         "reservation", reservation,
             RESERVATION_ID, shortReservationID,
@@ -1952,7 +1960,7 @@ public class TicketReservationManager {
 
         Locale locale = LocaleUtil.forLanguageTag(reservation.getUserLanguage());
         if(cancelReservation || configurationManager.getFor(NOTIFY_ALL_FAILED_PAYMENT_ATTEMPTS, purchaseContext.getConfigurationLevel()).getValueAsBooleanOrDefault()) {
-            notificationManager.sendSimpleEmail(purchaseContext, reservation.getId(), reservation.getEmail(), messageSource.getMessage("email-transaction-failed.subject",
+            notificationManager.sendSimpleEmail(purchaseContext, reservation.getId(), organization.getEmail(), messageSource.getMessage("email-transaction-failed.subject",
                 new Object[]{shortReservationID, purchaseContext.getDisplayName()}, locale),
             	() -> templateManager.renderTemplate(purchaseContext, TemplateResource.CHARGE_ATTEMPT_FAILED_EMAIL_FOR_ORGANIZER, model, locale),
                 List.of());
