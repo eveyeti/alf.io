@@ -2,7 +2,7 @@ import {ComponentFixture, fakeAsync, TestBed, tick} from '@angular/core/testing'
 import {NO_ERRORS_SCHEMA} from '@angular/core';
 import {ActivatedRoute, Router} from '@angular/router';
 import {TranslateModule} from '@ngx-translate/core';
-import {of} from 'rxjs';
+import {of, Subject} from 'rxjs';
 import {ProcessingPaymentComponent} from './processing-payment.component';
 import {ReservationService} from '../../shared/reservation.service';
 import {PurchaseContextService} from '../../shared/purchase-context.service';
@@ -121,6 +121,32 @@ describe('ProcessingPaymentComponent', () => {
       currentStatus = {status: 'COMPLETE', validatedBookingInformation: true};
       waitSeconds(2);
 
+      expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'success'], jasmine.anything());
+      fixture.destroy();
+      tick(60_000);
+    }));
+  });
+
+  /**
+   * El primer poll sale a los 2 s aunque la reserva todavía no haya cargado (red lenta): antes leía
+   * reservationInfo.status sin la reserva y el tick fallaba con un TypeError.
+   */
+  describe('con la reserva todavía cargando', () => {
+    beforeEach(async () => create('BANCHILE'));
+
+    it('no consulta el estado hasta tener la reserva, y después sigue como siempre', fakeAsync(() => {
+      const reservation = new Subject<ReservationInfo>();
+      reservationService.getReservationInfo.and.returnValue(reservation);
+      fixture.detectChanges();
+
+      waitSeconds(4);
+      expect(reservationService.getReservationStatusInfo).not.toHaveBeenCalled();
+
+      reservation.next({id: 'r1', status: 'EXTERNAL_PROCESSING_PAYMENT', paymentProxy: 'BANCHILE', orderSummary: {free: false}} as unknown as ReservationInfo);
+      currentStatus = {status: 'COMPLETE', validatedBookingInformation: true};
+      waitSeconds(2);
+
+      expect(reservationService.getReservationStatusInfo).toHaveBeenCalledTimes(1);
       expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'success'], jasmine.anything());
       fixture.destroy();
       tick(60_000);
