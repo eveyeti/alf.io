@@ -1,4 +1,4 @@
-import {Component, ElementRef, OnInit, ViewChild} from '@angular/core';
+import {Component, ElementRef, HostListener, OnInit, ViewChild} from '@angular/core';
 import {ActivatedRoute, NavigationExtras, Router} from '@angular/router';
 import {ReservationService} from '../../shared/reservation.service';
 import {UntypedFormBuilder, UntypedFormGroup} from '@angular/forms';
@@ -231,6 +231,46 @@ export class OverviewComponent implements OnInit {
             this.notifyPaymentError(err);
             notifyPaymentErrorToParent(this.purchaseContext, this.reservationInfo, this.reservationId, err);
         }
+    });
+  }
+
+  /**
+   * El navegador restauró la página desde su caché (bfcache), por ejemplo al volver con "Atrás" desde
+   * Banchile: quedó tal como estaba al irse, con "Por favor, espere" y sin hacer ninguna petición.
+   * Vuelve a consultar el estado de la reserva y, con la respuesta, deja de esperar:
+   * - con el pago en curso, pasa a "procesando pago", reemplazando esta entrada del historial para
+   *   que "Adelante" siga llevando a la página de pago;
+   * - con la reserva de vuelta en PENDING (el pago ya falló), se queda acá y la recarga, con el aviso;
+   * - con otro estado, va a la página de éxito y el guard lleva al comprador a la que corresponda.
+   *
+   * Mientras llega la respuesta sigue "Por favor, espere": si el botón "Pagar" volviera antes, un
+   * segundo clic crearía otra sesión en Banchile y dejaría inválida la que el comprador estaba pagando.
+   *
+   * @param event el pageshow; persisted es true solo si la página viene de la caché del navegador
+   */
+  @HostListener('window:pageshow', ['$event'])
+  onPageShow(event: PageTransitionEvent): void {
+    if (!event.persisted || this.reservationId == null) {
+      return;
+    }
+    this.paymentStatusNotification = null;
+    this.forceCheckInProgress = false;
+    this.unregisterHook();
+    this.reservationService.getReservationStatusInfo(this.reservationId).subscribe({
+      next: status => {
+        this.submitting = false;
+        if (status.status === 'PENDING' && status.validatedBookingInformation) {
+          this.loadReservation();
+        } else {
+          const page = status.status === 'EXTERNAL_PROCESSING_PAYMENT' || status.status === 'WAITING_EXTERNAL_CONFIRMATION'
+            ? 'processing-payment' : 'success';
+          this.router.navigate([this.purchaseContextType, this.publicIdentifier, 'reservation', this.reservationId, page], {replaceUrl: true});
+        }
+      },
+      error: err => {
+        console.log('could not reload the reservation status after coming back from the payment page', err);
+        this.submitting = false;
+      }
     });
   }
 
