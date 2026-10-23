@@ -33,6 +33,7 @@ import alfio.controller.support.TemplateProcessor;
 import alfio.manager.*;
 import alfio.manager.i18n.MessageSourceManager;
 import alfio.manager.payment.PaymentCheckSingleFlight;
+import alfio.manager.payment.PaymentPollThrottle;
 import alfio.manager.payment.PaymentSpecification;
 import alfio.manager.payment.StripeCreditCardManager;
 import alfio.manager.support.AdditionalServiceHelper;
@@ -117,6 +118,7 @@ public class ReservationApiV2Controller {
     private final PurchaseContextFieldManager purchaseContextFieldManager;
     private final TransactionRepository transactionRepository;
     private final PaymentCheckSingleFlight paymentCheckSingleFlight;
+    private final PaymentPollThrottle paymentPollThrottle;
 
     /**
      * Note: now it will return for any states of the reservation.
@@ -281,6 +283,9 @@ public class ReservationApiV2Controller {
         // estado en milisegundos, sin esperar al scheduler global.
         // Filter por transacción Banchile PENDING (no por reservation.payment_method, que
         // queda NULL hasta que la reserva se confirma).
+        // Con freno (PaymentPollThrottle): el primer poll de una tanda consulta a Banchile (el
+        // comprador acaba de llegar o de volver de Banchile) y después, a lo sumo uno cada 10 s;
+        // entre medio el poll responde con el estado actual de la reserva sin llamar a Banchile.
         // Una sola consulta a Banchile por pago a la vez, y a lo sumo 5 en total: el frontend no
         // espera la respuesta anterior y cada consulta espera el lock de la transacción con una
         // conexión tomada. Con una consulta en curso para el pago, o sin cupo, el poll responde con
@@ -288,7 +293,10 @@ public class ReservationApiV2Controller {
         transactionRepository.loadOptionalByReservationIdAndStatus(reservationId, Transaction.Status.PENDING)
             .filter(tx -> tx.getPaymentProxy() == PaymentProxy.BANCHILE)
             .ifPresent(tx -> {
-                if (!paymentCheckSingleFlight.runIfIdle(tx.getId(), () -> forceBanchileTransactionCheck(reservationId))) {
+                if (!paymentPollThrottle.shouldQuery(tx.getId())) {
+                    log.trace("[banchile-poll] reservation={} sin consultar a Banchile (freno del poll): se responde con el estado actual",
+                        reservationId);
+                } else if (!paymentCheckSingleFlight.runIfIdle(tx.getId(), () -> forceBanchileTransactionCheck(reservationId))) {
                     log.debug("[banchile-poll] reservation={} sin consultar a Banchile (consulta en curso para el pago o sin cupo): "
                         + "se responde con el estado actual", reservationId);
                 }

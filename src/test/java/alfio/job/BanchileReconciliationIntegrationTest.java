@@ -130,7 +130,8 @@ import static org.mockserver.model.HttpResponse.response;
     DataSourceConfiguration.class,
     TestConfiguration.class,
     ControllerConfiguration.class,
-    BanchileReconciliationIntegrationTest.ShortBanchileTimeoutConfiguration.class
+    BanchileReconciliationIntegrationTest.ShortBanchileTimeoutConfiguration.class,
+    PollThrottleTestClock.Manual.class
 })
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
 class BanchileReconciliationIntegrationTest {
@@ -196,6 +197,8 @@ class BanchileReconciliationIntegrationTest {
     private TicketReservationRepository ticketReservationRepository;
     @Autowired
     private TransactionRepository transactionRepository;
+    @Autowired
+    private PollThrottleTestClock pollThrottleClock;
     @Autowired
     private PurchaseContextManager purchaseContextManager;
     @Autowired
@@ -1105,8 +1108,10 @@ class BanchileReconciliationIntegrationTest {
         assertNull(transactionByRequestId(63601).metadata().get(INVALIDATED_SESSION_REVIEW));
         assertTrue(emailsFor(event).isEmpty());
 
-        // Banchile vuelve a responder: la consulta siguiente alerta y recién entonces corre el flujo de pago fallido
+        // Banchile vuelve a responder: la consulta siguiente (la que deja pasar el freno del poll)
+        // alerta y recién entonces corre el flujo de pago fallido
         banchileResponds(63601, approved(63601));
+        pollThrottleClock.letTheNextPollQuery();
         reservationApiV2Controller.getReservationStatus(reservationId);
 
         assertEquals(1, invalidSessionAlertsFor(event).size());

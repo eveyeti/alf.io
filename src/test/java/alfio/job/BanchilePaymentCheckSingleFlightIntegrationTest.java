@@ -121,7 +121,8 @@ import static org.junit.jupiter.api.Assertions.*;
     DataSourceConfiguration.class,
     TestConfiguration.class,
     ControllerConfiguration.class,
-    BanchilePaymentCheckSingleFlightIntegrationTest.BanchileTimeoutConfiguration.class
+    BanchilePaymentCheckSingleFlightIntegrationTest.BanchileTimeoutConfiguration.class,
+    PollThrottleTestClock.FollowingRealTime.class
 })
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
 class BanchilePaymentCheckSingleFlightIntegrationTest {
@@ -189,6 +190,8 @@ class BanchilePaymentCheckSingleFlightIntegrationTest {
     private PlatformTransactionManager transactionManager;
     @Autowired
     private ClockProvider clockProvider;
+    @Autowired
+    private PollThrottleTestClock pollThrottleClock;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
     private FakeBanchile banchile;
@@ -237,8 +240,9 @@ class BanchilePaymentCheckSingleFlightIntegrationTest {
         assertEquals(1, held.pool().maxActive(), () -> "solo la request que consulta a Banchile retiene una conexión: " + held.pool());
         assertEquals(0, held.pool().maxAwaiting(), () -> "nadie espera una conexión: " + held.pool());
 
-        // terminada la consulta en curso, el poll siguiente consulta de nuevo
+        // terminada la consulta en curso, el próximo poll que deja pasar el freno consulta de nuevo
         banchile.respond(51001, pending(51001), Duration.ZERO);
+        pollThrottleClock.letTheNextPollQuery();
         assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationApiV2Controller.getReservationStatus(reservationId).getBody().getStatus());
         assertEquals(2, banchile.queries(51001));
     }
@@ -376,8 +380,10 @@ class BanchilePaymentCheckSingleFlightIntegrationTest {
             () -> "el poll colgado debía volver por el tope del cliente y tardó " + hung.elapsed().toMillis() + " ms");
         assertEquals(EXTERNAL_PROCESSING_PAYMENT, statusOf(hung), "un timeout no cambia nada");
 
-        // el turno se liberó con el timeout: el poll siguiente consulta de nuevo y aplica el resultado
+        // el turno se liberó con el timeout: el próximo poll que deja pasar el freno consulta de nuevo y
+        // aplica el resultado (acá lo deja pasar adelantando su reloj, para no depender de cuánto duró el cuelgue)
         banchile.respond(51004, approved(51004), Duration.ZERO);
+        pollThrottleClock.letTheNextPollQuery();
         assertEquals(COMPLETE, reservationApiV2Controller.getReservationStatus(reservationId).getBody().getStatus());
         assertEquals(2, banchile.queries(51004));
     }
@@ -666,9 +672,12 @@ class BanchilePaymentCheckSingleFlightIntegrationTest {
                 assertEquals(PaymentResult.pending("57106"), forceCheck.value().getBody(), "el force-check responde como uno omitido");
                 assertEquals(0, banchile.queries(57106), "con los 5 cupos ocupados no se consulta a Banchile");
 
-                // termina la primera consulta: el cupo libre lo toma el poll siguiente
+                // termina la primera consulta: el cupo libre lo toma el próximo poll que deja pasar el freno
+                // (el poll rechazado por el tope contó como consulta para el freno: con los cupos llenos, el
+                // comprador espera los 10 s antes de volver a intentar)
                 banchile.release(57101);
                 assertEquals(EXTERNAL_PROCESSING_PAYMENT, statusOf(holding.get(0).get(WAIT.toSeconds(), TimeUnit.SECONDS)));
+                pollThrottleClock.letTheNextPollQuery();
                 assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationApiV2Controller.getReservationStatus(next).getBody().getStatus());
                 assertEquals(1, banchile.queries(57106), "liberado un cupo, el poll siguiente consulta");
             } finally {

@@ -61,6 +61,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockserver.integration.ClientAndServer;
 import org.mockserver.matchers.Times;
+import org.mockserver.model.ClearType;
 import org.mockserver.model.MediaType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
@@ -83,6 +84,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 
+import static alfio.model.TicketReservation.TicketReservationStatus.COMPLETE;
 import static alfio.model.TicketReservation.TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT;
 import static alfio.model.TicketReservation.TicketReservationStatus.PENDING;
 import static alfio.model.system.ConfigurationKeys.*;
@@ -115,7 +117,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     DataSourceConfiguration.class,
     TestConfiguration.class,
     ControllerConfiguration.class,
-    BanchileReconciliationIntegrationTest.ShortBanchileTimeoutConfiguration.class
+    BanchileReconciliationIntegrationTest.ShortBanchileTimeoutConfiguration.class,
+    PollThrottleTestClock.Manual.class
 })
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
 class BanchileSessionIntegrationTest {
@@ -173,6 +176,8 @@ class BanchileSessionIntegrationTest {
     private ClockProvider clockProvider;
     @Autowired
     private NamedParameterJdbcTemplate jdbc;
+    @Autowired
+    private PollThrottleTestClock pollThrottleClock;
 
     @BeforeAll
     static void startFakeBanchile() {
@@ -357,6 +362,88 @@ class BanchileSessionIntegrationTest {
         assertEquals("51", details.getStatusReason());
         assertEquals("Fondos insuficientes", details.getStatusMessage());
         assertNull(details.getAuthorization(), "el 000000 del intento rechazado no es un código de autorización");
+    }
+
+    // -------------------------------------------------------------------------
+    // El freno del poll de "procesando pago"
+    // -------------------------------------------------------------------------
+
+    /**
+     * El comprador espera en "procesando pago", que consulta el estado cada 2 s: el poll consulta a
+     * Banchile en el primero y después cada 10 s; entre medio responde con el estado conocido de la
+     * reserva, sin llamar a Banchile. Antes, cada poll llegaba a Banchile.
+     */
+    @Test
+    void whileTheBuyerWaitsThePollQueriesBanchileAtMostEveryTenSeconds() {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        payWithBanchileAt(event, reservationId, 54001, Instant.now());
+        banchileResponds(54001, pending(54001));
+
+        var queries = new ArrayList<Integer>();
+        // un poll cada 2 s durante 20 s
+        for (int second = 0; second <= 20; second += 2) {
+            var status = reservationApiV2Controller.getReservationStatus(reservationId).getBody();
+            assertNotNull(status);
+            assertEquals(EXTERNAL_PROCESSING_PAYMENT, status.getStatus(), "segundo " + second);
+            queries.add(queriesTo(54001));
+            pollThrottleClock.advance(Duration.ofSeconds(2));
+        }
+
+        // consultas acumuladas después de cada poll: a los 0, 10 y 20 s
+        assertEquals(List.of(1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3), queries);
+    }
+
+    /**
+     * Entre consulta y consulta el poll no ve lo que pasó en Banchile: la tarjeta se rechazó a los 4 s,
+     * pero el rechazo se aplica con la consulta de los 10 s. La reserva vuelve a PENDING igual.
+     */
+    @Test
+    void aRejectionBetweenQueriesIsAppliedByTheNextQuery() {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        payWithBanchileAt(event, reservationId, 54002, Instant.now());
+        banchileResponds(54002, pending(54002));
+        reservationApiV2Controller.getReservationStatus(reservationId);
+        pollThrottleClock.advance(Duration.ofSeconds(2));
+        reservationApiV2Controller.getReservationStatus(reservationId);
+        banchileResponds(54002, rejectedCard(54002));
+
+        for (int second = 4; second < 10; second += 2) {
+            pollThrottleClock.advance(Duration.ofSeconds(2));
+            assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationApiV2Controller.getReservationStatus(reservationId).getBody().getStatus(),
+                "segundo " + second + ": el último estado conocido");
+        }
+        pollThrottleClock.advance(Duration.ofSeconds(2));
+
+        assertEquals(PENDING, reservationApiV2Controller.getReservationStatus(reservationId).getBody().getStatus(),
+            "a los 10 s el poll consulta y aplica el rechazo");
+        assertEquals(2, queriesTo(54002));
+    }
+
+    /**
+     * El comprador vuelve de Banchile con el pago aprobado. Antes de irse, "procesando pago" consultó
+     * hace menos de 10 s (volvió con "Atrás" y siguió pagando con "Adelante"), pero mientras pagaba
+     * nadie hizo polls: el primer poll al volver consulta igual y la reserva queda confirmada al tiro.
+     */
+    @Test
+    void theFirstPollAfterComingBackFromBanchileQueriesAndConfirmsRightAway() {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        payWithBanchileAt(event, reservationId, 54003, Instant.now());
+        banchileResponds(54003, pending(54003));
+        reservationApiV2Controller.getReservationStatus(reservationId);
+        pollThrottleClock.advance(Duration.ofSeconds(2));
+        reservationApiV2Controller.getReservationStatus(reservationId);
+        assertEquals(1, queriesTo(54003));
+
+        // paga en Banchile: 6 s sin polls
+        banchileResponds(54003, approved(54003));
+        pollThrottleClock.advance(Duration.ofSeconds(6));
+
+        assertEquals(COMPLETE, reservationApiV2Controller.getReservationStatus(reservationId).getBody().getStatus(),
+            "el primer poll al volver confirma, 8 s después de la consulta anterior");
+        assertEquals(2, queriesTo(54003));
     }
 
     /**
@@ -593,9 +680,13 @@ class BanchileSessionIntegrationTest {
             Map.of("eventId", event.getId(), "recipient", BUYER_EMAIL), String.class);
     }
 
+    /**
+     * Desde ahora, querySession de la sesión responde {@code body}. Cambia solo la respuesta: las
+     * consultas que el Banchile falso ya registró siguen contando en {@link #queriesTo}.
+     */
     private static void banchileResponds(int requestId, String body) {
         var querySession = request().withMethod("POST").withPath("/api/session/" + requestId);
-        banchile.clear(querySession);
+        banchile.clear(querySession, ClearType.EXPECTATIONS);
         banchile.when(querySession).respond(response().withStatusCode(200).withContentType(MediaType.APPLICATION_JSON).withBody(body));
     }
 
@@ -608,6 +699,32 @@ class BanchileSessionIntegrationTest {
             {"requestId": %d,
              "status": {"status": "REJECTED", "reason": "%s", "message": "%s", "date": "2026-11-28T18:40:00-03:00"}}
             """.formatted(requestId, reason, message);
+    }
+
+    /** querySession de una sesión abierta, sin pago todavía. */
+    private static String pending(int requestId) {
+        return """
+            {"requestId": %d,
+             "status": {"status": "PENDING", "reason": "PC", "message": "La petición se encuentra activa", "date": "2026-11-28T18:01:00-03:00"}}
+            """.formatted(requestId);
+    }
+
+    /** querySession de un pago aprobado. */
+    private static String approved(int requestId) {
+        return """
+            {"requestId": %d,
+             "status": {"status": "APPROVED", "reason": "00", "message": "La petición ha sido aprobada exitosamente", "date": "2026-11-28T18:05:00-03:00"},
+             "payment": [{"status": {"status": "APPROVED", "reason": "00", "message": "Aprobada", "date": "2026-11-28T18:05:00-03:00"},
+                          "internalReference": %d, "paymentMethod": "visa", "paymentMethodName": "Visa", "issuerName": "BANCO DE PRUEBA",
+                          "amount": {"from": {"total": 20, "currency": "CHF"}, "to": {"total": 20, "currency": "CHF"}, "factor": 1},
+                          "authorization": "004393", "reference": "REF%d", "receipt": "6145%d", "franchise": "visa", "refunded": false,
+                          "processorFields": [{"keyword": "lastDigits", "value": "4242", "displayOn": "none"}]}]}
+            """.formatted(requestId, 900000 + requestId, requestId, requestId);
+    }
+
+    /** Cuántas veces alf.io consultó la sesión en el Banchile falso (querySession). */
+    private static int queriesTo(int requestId) {
+        return banchile.retrieveRecordedRequests(request().withMethod("POST").withPath("/api/session/" + requestId)).length;
     }
 
     /**
