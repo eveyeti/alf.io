@@ -10,6 +10,12 @@ import {PurchaseContext} from '../../model/purchase-context';
 import {SearchParams} from '../../model/search-params';
 import {notifyPaymentErrorToParent} from '../../shared/util';
 
+/**
+ * Cuánto espera "procesando pago" antes de explicar qué hacer si el resultado del pago con Banchile
+ * no llega: terminar de pagar en Banchile, o cerrar la página sin perder la reserva.
+ */
+export const BANCHILE_HELP_DELAY_MS = 60_000;
+
 @Component({
   selector: 'app-processing-payment',
   templateUrl: './processing-payment.component.html'
@@ -25,8 +31,10 @@ export class ProcessingPaymentComponent implements OnInit, OnDestroy {
   forceCheckVisible = false;
   providerWarningVisible = false;
   private forceCheckInProgress = false;
+  private banchileHelpDelayElapsed = false;
 
   private intervalId: any;
+  private banchileHelpTimeoutId: any;
 
   constructor(
     private route: ActivatedRoute,
@@ -63,12 +71,29 @@ export class ProcessingPaymentComponent implements OnInit, OnDestroy {
             this.reservationStateChanged();
           }
           if ((!this.forceCheckVisible || checkCount > 120) && !this.forceCheckInProgress && checkCount % 10 === 0) {
-            this.providerWarningVisible = checkCount > 120;
+            // con Banchile, a los 4 minutos lo normal es que el comprador no haya terminado de pagar, no
+            // que el proveedor falle: la explicación de Banchile reemplaza a ese aviso
+            this.providerWarningVisible = checkCount > 120 && !this.paidWithBanchile;
             this.forceCheckVisible = !this.providerWarningVisible;
           }
         });
       }, 2000);
+      this.banchileHelpTimeoutId = setTimeout(() => this.banchileHelpDelayElapsed = true, BANCHILE_HELP_DELAY_MS);
     });
+  }
+
+  /** true si la reserva está esperando un pago con Banchile. */
+  get paidWithBanchile(): boolean {
+    return this.reservationInfo?.paymentProxy === 'BANCHILE';
+  }
+
+  /**
+   * true si hay que explicar qué hacer mientras no llega el resultado del pago con Banchile: pasó un
+   * minuto sin resultado. El comprador puede haber vuelto con "Atrás" o no haber terminado de pagar;
+   * la página sigue consultando el estado y cambia sola si llega el resultado.
+   */
+  get banchileHelpVisible(): boolean {
+    return this.banchileHelpDelayElapsed && this.paidWithBanchile;
   }
   private reservationStateChanged() {
     // try to navigate to /success. If the reservation is in a different status, the user will be
@@ -80,6 +105,7 @@ export class ProcessingPaymentComponent implements OnInit, OnDestroy {
 
   public ngOnDestroy() {
     clearInterval(this.intervalId);
+    clearTimeout(this.banchileHelpTimeoutId);
   }
 
   forceCheck(): void {

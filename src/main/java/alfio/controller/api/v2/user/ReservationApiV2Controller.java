@@ -222,9 +222,21 @@ public class ReservationApiV2Controller {
             }
 
             // Detalles del pago externo (Banchile): leer metadata de la última transacción.
-            var paymentDetails = transactionRepository.loadOptionalByReservationId(reservationId)
+            var transaction = transactionRepository.loadOptionalByReservationId(reservationId);
+            var paymentDetails = transaction
                 .map(tx -> ReservationInfo.PaymentDetailsInfo.fromMetadata(tx.getMetadata()))
                 .orElse(null);
+
+            // Proveedor del pago: el del token o el guardado en la reserva. Con un pago en curso sin token
+            // (Banchile, que tampoco guarda el medio de pago en la reserva hasta confirmarla), el de la
+            // transacción PENDING: así "procesando pago" sabe que está esperando a Banchile.
+            PaymentProxy paymentProxy = selectedPaymentProxy != null ? selectedPaymentProxy : reservation.getPaymentMethod();
+            if (paymentProxy == null) {
+                paymentProxy = transaction
+                    .filter(tx -> tx.getStatus() == Transaction.Status.PENDING)
+                    .map(Transaction::getPaymentProxy)
+                    .orElse(null);
+            }
 
             return Optional.of(new ReservationInfo(reservation.getId(), shortReservationId,
                 reservation.getFirstName(), reservation.getLastName(), reservation.getEmail(),
@@ -238,7 +250,7 @@ public class ReservationApiV2Controller {
                 reservation.getHasInvoiceOrReceiptDocument(),
                 reservation.getHasBeenPaid(),
                 tokenAcquired,
-                selectedPaymentProxy != null ? selectedPaymentProxy : reservation.getPaymentMethod(),
+                paymentProxy,
                 //
                 additionalInfo.getAddCompanyBillingDetails(),
                 reservation.getCustomerReference(),

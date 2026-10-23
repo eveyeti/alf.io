@@ -364,6 +364,30 @@ class BanchileSessionIntegrationTest {
         assertNull(details.getAuthorization(), "el 000000 del intento rechazado no es un código de autorización");
     }
 
+    /**
+     * "Procesando pago" explica qué hacer cuando el pago con Banchile tarda: para eso necesita saber
+     * que el pago en curso es de Banchile. Banchile no usa el token de pago de alf.io y la reserva no
+     * guarda el medio de pago hasta confirmarse, así que el proveedor sale de la transacción PENDING.
+     * Sin pago en curso no cambia nada: sin token ni medio de pago guardado, va vacío, como antes.
+     */
+    @Test
+    void whileThePaymentIsInProgressTheReservationTellsItIsPaidWithBanchile() {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        assertNull(reservationApiV2Controller.getReservationInfo(reservationId, null).getBody().getPaymentProxy(),
+            "antes de apretar \"Pagar\"");
+
+        payWithBanchileAt(event, reservationId, 52201, Instant.now());
+        assertEquals(PaymentProxy.BANCHILE, reservationApiV2Controller.getReservationInfo(reservationId, null).getBody().getPaymentProxy(),
+            "con la sesión de Banchile abierta");
+
+        banchileResponds(52201, rejectedCard(52201));
+        reservationApiV2Controller.getReservationStatus(reservationId);
+        assertEquals(PENDING, reservationStatus(reservationId));
+        assertNull(reservationApiV2Controller.getReservationInfo(reservationId, null).getBody().getPaymentProxy(),
+            "con el pago fallido y la reserva de vuelta en PENDING, como antes");
+    }
+
     // -------------------------------------------------------------------------
     // El freno del poll de "procesando pago"
     // -------------------------------------------------------------------------
