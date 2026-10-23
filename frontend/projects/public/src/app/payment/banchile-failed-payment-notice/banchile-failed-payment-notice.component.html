@@ -1,8 +1,7 @@
 <div *ngIf="failed" class="alert alert-warning d-flex align-items-start mb-4" role="alert">
   <fa-icon [icon]="['fas', 'exclamation-triangle']" class="me-2 mt-1" a11yRole="presentation"></fa-icon>
   <div>
-    <strong>Tu intento de pago anterior fue rechazado.</strong>
-    <div class="mt-1">Motivo: {{paymentDetails.statusMessage}}<span *ngIf="paymentDetails.statusReason"> (código {{paymentDetails.statusReason}})</span>.</div>
-    <div class="mt-1">Podés intentar nuevamente con otra tarjeta.</div>
+    <div class="failed-attempt-text">{{ textKey | translate }}</div>
+    <div *ngIf="bankDetail" class="failed-attempt-bank-detail mt-1 small">{{ bankDetailKey | translate: {'0': bankDetail} }}</div>
   </div>
 </div>
