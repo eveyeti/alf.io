@@ -6,8 +6,19 @@
     "types": [
       "jasmine",
       "@angular/localize"
-    ]
+    ],
+    /* the same relaxed checks as tsconfig.app.json: the app does not compile in strict mode yet */
+    "strict": false,
+    "noPropertyAccessFromIndexSignature": false
   },
+  "angularCompilerOptions": {
+    "strictPropertyInitialization": false,
+    "strictInjectionParameters": false,
+    "strictTemplates": false
+  },
+  "files": [
+    "src/test.ts"
+  ],
   "include": [
     "src/**/*.spec.ts",
     "src/**/*.d.ts"
