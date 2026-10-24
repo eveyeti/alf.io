@@ -46,8 +46,8 @@ class BanchilePaymentInProgressTranslationsTest {
     void spanish() {
         var bundle = bundle("es");
         assertEquals("Todavía no tenemos la respuesta de Banchile Pagos.", bundle.get(PREFIX + "title"));
-        assertEquals("Si todavía estás pagando en Banchile, termina ahí: esta página se actualiza sola cuando llegue la respuesta.",
-            bundle.get(PREFIX + "still-paying"));
+        assertEquals("Si todavía estás pagando en Banchile, vuelve a esa ventana o pestaña (o usa el botón Adelante del navegador) "
+            + "y termina el pago ahí. Esta página se actualiza sola cuando llegue la respuesta.", bundle.get(PREFIX + "still-paying"));
         assertEquals("Si no vas a pagar, puedes cerrar esta página: tu reserva queda guardada y, cuando venza la sesión de pago, "
             + "te enviaremos un correo para que vuelvas a intentar el pago.", bundle.get(PREFIX + "not-paying"));
     }
@@ -56,8 +56,8 @@ class BanchilePaymentInProgressTranslationsTest {
     void english() {
         var bundle = bundle("en");
         assertEquals("We have not received the answer from Banchile Pagos yet.", bundle.get(PREFIX + "title"));
-        assertEquals("If you are still paying on Banchile, finish there: this page updates by itself when the answer arrives.",
-            bundle.get(PREFIX + "still-paying"));
+        assertEquals("If you are still paying on Banchile, go back to that window or tab (or use the Forward button in your browser) "
+            + "and finish the payment there. This page updates by itself when the answer arrives.", bundle.get(PREFIX + "still-paying"));
         assertEquals("If you are not going to pay, you can close this page: your reservation stays on hold and, when the payment "
             + "session expires, we will send you an email so you can try to pay again.", bundle.get(PREFIX + "not-paying"));
     }
@@ -66,8 +66,8 @@ class BanchilePaymentInProgressTranslationsTest {
     void italian() {
         var bundle = bundle("it");
         assertEquals("Non abbiamo ancora ricevuto la risposta di Banchile Pagos.", bundle.get(PREFIX + "title"));
-        assertEquals("Se stai ancora pagando su Banchile, completa il pagamento lì: questa pagina si aggiorna da sola quando arriva la risposta.",
-            bundle.get(PREFIX + "still-paying"));
+        assertEquals("Se stai ancora pagando su Banchile, torna a quella finestra o scheda (oppure usa il pulsante Avanti del browser) "
+            + "e completa lì il pagamento. Questa pagina si aggiorna da sola quando arriva la risposta.", bundle.get(PREFIX + "still-paying"));
         assertEquals("Se non intendi pagare, puoi chiudere questa pagina: la tua prenotazione resta valida e, quando scade la sessione "
             + "di pagamento, ti invieremo un'email per riprovare a pagare.", bundle.get(PREFIX + "not-paying"));
     }
