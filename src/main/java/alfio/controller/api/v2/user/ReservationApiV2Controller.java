@@ -308,7 +308,7 @@ public class ReservationApiV2Controller {
                 if (!paymentPollThrottle.shouldQuery(tx.getId())) {
                     log.trace("[banchile-poll] reservation={} sin consultar a Banchile (freno del poll): se responde con el estado actual",
                         reservationId);
-                } else if (!paymentCheckSingleFlight.runIfIdle(tx.getId(), () -> forceBanchileTransactionCheck(reservationId))) {
+                } else if (!paymentCheckSingleFlight.runIfIdle(tx.getId(), () -> forceBanchileTransactionCheck(reservationId, tx.getId()))) {
                     log.debug("[banchile-poll] reservation={} sin consultar a Banchile (consulta en curso para el pago o sin cupo): "
                         + "se responde con el estado actual", reservationId);
                 }
@@ -321,20 +321,31 @@ public class ReservationApiV2Controller {
 
     /**
      * Consulta a Banchile el pago de la reserva y aplica el resultado, vía
-     * {@link TicketReservationManager#forceTransactionCheck}.
+     * {@link TicketReservationManager#forceTransactionCheck}. Si la consulta falla (red, timeout o
+     * error de Banchile), se lo avisa al freno del poll: la próxima consulta espera 10 s desde la falla.
      *
      * @param reservationId reserva con una transacción Banchile PENDING
+     * @param transactionId id de esa transacción
      */
-    private void forceBanchileTransactionCheck(String reservationId) {
+    private void forceBanchileTransactionCheck(String reservationId, int transactionId) {
         ticketReservationManager.findById(reservationId)
             .flatMap(r -> purchaseContextManager.findByReservationId(reservationId)
                 .map(pc -> Pair.of(pc, r)))
             .ifPresent(pair -> {
                 log.info("[banchile-poll] dispatching forceTransactionCheck for reservation={} status={}",
                     reservationId, pair.getRight().getStatus());
-                var result = ticketReservationManager.forceTransactionCheck(pair.getLeft(), pair.getRight());
+                Optional<TicketReservationManager.ForcedTransactionCheck> result;
+                try {
+                    result = ticketReservationManager.forceTransactionCheckWithProviderResult(pair.getLeft(), pair.getRight());
+                } catch (RuntimeException e) {
+                    paymentPollThrottle.queryFailed(transactionId);
+                    throw e;
+                }
+                if (result.filter(TicketReservationManager.ForcedTransactionCheck::providerFailed).isPresent()) {
+                    paymentPollThrottle.queryFailed(transactionId);
+                }
                 log.info("[banchile-poll] forceTransactionCheck result={}",
-                    result.map(Object::toString).orElse("empty"));
+                    result.map(check -> check.paymentResult() + (check.providerFailed() ? " (la consulta a Banchile falló)" : "")).orElse("empty"));
             });
     }
 

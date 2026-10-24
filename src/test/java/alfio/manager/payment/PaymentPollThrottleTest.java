@@ -172,6 +172,91 @@ class PaymentPollThrottleTest {
         assertTrue(throttle.shouldQuery(0), "un pago olvidado consulta en su próximo poll, como antes de olvidarlo");
     }
 
+    // -------------------------------------------------------------------------
+    // Una consulta fallida también cuenta para la ventana de 10 s
+    // -------------------------------------------------------------------------
+
+    /**
+     * QA del 23-oct: durante una caída de red hubo consultas a Banchile separadas por unos 5 s
+     * (23:45:29.2 y 23:45:34.4). Con los polls intermitentes, cada poll después de una pausa abría una
+     * tanda nueva y volvía a consultar. Después de una consulta fallida no hay tanda nueva que valga:
+     * la próxima espera 10 s desde la falla.
+     */
+    @Test
+    void afterAFailedQueryAPauseDoesNotStartANewRound() {
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID));
+        throttle.queryFailed(TRANSACTION_ID);
+
+        advance(PaymentPollThrottle.NEW_POLLING_ROUND_GAP.plusMillis(200));
+        assertFalse(throttle.shouldQuery(TRANSACTION_ID), "5,2 s después de la falla, como en el QA, no consulta");
+
+        advance(PaymentPollThrottle.MIN_INTERVAL_BETWEEN_QUERIES.minus(PaymentPollThrottle.NEW_POLLING_ROUND_GAP).minusMillis(200));
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID), "10 s después de la falla, sí");
+    }
+
+    /**
+     * Una consulta que falla por timeout (20 s en producción): la ventana cuenta desde que falla, no
+     * desde que empezó, así que no se vuelve a consultar al tiro después de esperar a Banchile. (A los
+     * 10 s el freno deja pasar un poll, pero la consulta colgada tiene el turno del pago y el
+     * single-flight lo responde sin consultar.)
+     */
+    @Test
+    void theWindowAfterAFailedQueryStartsWhenTheQueryFails() {
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID));
+        var letThrough = new ArrayList<Integer>();
+        for (int second = 2; second <= 18; second += 2) {
+            advance(POLL_INTERVAL);
+            if (throttle.shouldQuery(TRANSACTION_ID)) {
+                letThrough.add(second);
+            }
+        }
+        assertEquals(List.of(10), letThrough, "mientras la primera consulta espera a Banchile");
+        // la consulta colgada falla a los 19 s
+        advance(Duration.ofSeconds(1));
+        throttle.queryFailed(TRANSACTION_ID);
+
+        for (int second = 20; second <= 28; second += 2) {
+            advance(second == 20 ? Duration.ofSeconds(1) : POLL_INTERVAL);
+            assertFalse(throttle.shouldQuery(TRANSACTION_ID), "segundo " + second + ": menos de 10 s desde la falla");
+        }
+        advance(POLL_INTERVAL);
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID), "segundo 30: 11 s desde la falla");
+    }
+
+    @Test
+    void whenTheNextQueryIsDecidedTheNewRoundRuleIsBack() {
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID));
+        throttle.queryFailed(TRANSACTION_ID);
+        advance(PaymentPollThrottle.MIN_INTERVAL_BETWEEN_QUERIES);
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID), "la consulta siguiente, que esta vez no falla");
+
+        advance(PaymentPollThrottle.NEW_POLLING_ROUND_GAP);
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID), "el comprador vuelve de Banchile: tanda nueva, como siempre");
+    }
+
+    @Test
+    void aFailedQueryIsNotForgottenWhileItStillHoldsTheNextOne() {
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID));
+        throttle.queryFailed(TRANSACTION_ID);
+        for (int id = 1; id <= PaymentPollThrottle.PRUNE_THRESHOLD; id++) {
+            assertTrue(throttle.shouldQuery(TRANSACTION_ID + id));
+        }
+        advance(PaymentPollThrottle.NEW_POLLING_ROUND_GAP);
+        // limpieza: los demás pagos se olvidan, el de la falla no
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID + PaymentPollThrottle.PRUNE_THRESHOLD + 1));
+
+        assertFalse(throttle.shouldQuery(TRANSACTION_ID), "la falla sigue frenando la consulta siguiente");
+    }
+
+    @Test
+    void aFailureOfAPaymentWithoutPollsIsRecordedToo() {
+        throttle.queryFailed(TRANSACTION_ID);
+
+        assertFalse(throttle.shouldQuery(TRANSACTION_ID));
+        advance(PaymentPollThrottle.MIN_INTERVAL_BETWEEN_QUERIES);
+        assertTrue(throttle.shouldQuery(TRANSACTION_ID));
+    }
+
     @Test
     void thePolicyIsTenSecondsBetweenQueriesAndFiveSecondsOfPause() {
         assertEquals(Duration.ofSeconds(10), PaymentPollThrottle.MIN_INTERVAL_BETWEEN_QUERIES);

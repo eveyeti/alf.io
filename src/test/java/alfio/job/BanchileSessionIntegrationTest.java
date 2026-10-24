@@ -586,6 +586,33 @@ class BanchileSessionIntegrationTest {
     }
 
     /**
+     * QA del 23-oct: durante una caída de red, consultas a Banchile separadas por unos 5 s. Una
+     * consulta que falla (acá, Banchile responde 500) cuenta para la ventana de 10 s aunque después
+     * haya una pausa en los polls: la siguiente consulta espera 10 s desde la falla.
+     */
+    @Test
+    void aFailedQueryHoldsTheNextOneForTenSecondsEvenAfterAPause() {
+        var event = createEvent();
+        var reservationId = reservationOf(event, DateUtils.addMinutes(new Date(), 25));
+        payWithBanchileAt(event, reservationId, 54004, Instant.now());
+        var querySession = request().withMethod("POST").withPath("/api/session/54004");
+        banchile.when(querySession).respond(response().withStatusCode(500).withContentType(MediaType.APPLICATION_JSON).withBody("{}"));
+
+        reservationApiV2Controller.getReservationStatus(reservationId);
+        assertEquals(1, queriesTo(54004));
+
+        // polls intermitentes: 5,2 s sin polls, como en el QA
+        pollThrottleClock.advance(Duration.ofMillis(5_200));
+        assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationApiV2Controller.getReservationStatus(reservationId).getBody().getStatus());
+        assertEquals(1, queriesTo(54004), "5,2 s después de la falla no se vuelve a consultar");
+
+        pollThrottleClock.advance(Duration.ofMillis(4_800));
+        reservationApiV2Controller.getReservationStatus(reservationId);
+        assertEquals(2, queriesTo(54004), "10 s después de la falla, sí");
+        assertEquals(EXTERNAL_PROCESSING_PAYMENT, reservationStatus(reservationId), "una consulta fallida no cambia la reserva");
+    }
+
+    /**
      * Si Banchile no crea la sesión, la reserva no cambia: ni su validez ni su estado.
      */
     @Test

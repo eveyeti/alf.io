@@ -50,9 +50,13 @@ import java.util.function.LongSupplier;
  * turno del pago, así que no deja sin consultar a un webhook de Banchile que llegue en ese momento
  * (con el turno tomado, el webhook no consulta y deja el pago al poll o al cron).
  *
+ * <p>Una consulta que falla (red, timeout o error de Banchile, ver {@link #queryFailed}) también
+ * cuenta: la próxima espera {@link #MIN_INTERVAL_BETWEEN_QUERIES} desde la falla, sin tanda nueva que
+ * valga, para no insistir más seguido justo cuando Banchile o la red están caídos.
+ *
  * <p>Como {@link PaymentCheckSingleFlight}, supone una sola instancia de alf.io: el registro vive en
- * memoria. Solo guarda los pagos con polls en los últimos {@link #NEW_POLLING_ROUND_GAP}; olvidar uno
- * más viejo no cambia nada, porque su próximo poll igual consultaría.
+ * memoria. Olvida los pagos cuyo próximo poll consultaría igual (en general, los que no tienen polls
+ * en los últimos {@link #NEW_POLLING_ROUND_GAP}): olvidarlos no cambia nada.
  */
 @Component
 public class PaymentPollThrottle {
@@ -75,9 +79,10 @@ public class PaymentPollThrottle {
     static final int PRUNE_THRESHOLD = 256;
 
     /**
-     * Último poll y última consulta de un pago, en nanosegundos del reloj del freno.
+     * Último poll y última consulta de un pago, en nanosegundos del reloj del freno, y si esa consulta
+     * falló (en ese caso, lastQueryNanos es cuándo falló).
      */
-    private record Polls(long lastPollNanos, long lastQueryNanos) {}
+    private record Polls(long lastPollNanos, long lastQueryNanos, boolean lastQueryFailed) {}
 
     private final ConcurrentHashMap<Integer, Polls> pollsByTransaction = new ConcurrentHashMap<>();
     private final LongSupplier nanoTime;
@@ -118,16 +123,38 @@ public class PaymentPollThrottle {
         long now = nanoTime.getAsLong();
         var query = new boolean[1];
         pollsByTransaction.compute(transactionId, (id, previous) -> {
-            query[0] = previous == null
-                || now - previous.lastPollNanos() >= newRoundGapNanos
-                || now - previous.lastQueryNanos() >= minIntervalNanos;
-            return new Polls(now, query[0] ? now : previous.lastQueryNanos());
+            query[0] = previous == null || queryIsDue(previous, now);
+            return query[0] ? new Polls(now, now, false) : new Polls(now, previous.lastQueryNanos(), previous.lastQueryFailed());
         });
         if (pollsByTransaction.size() > PRUNE_THRESHOLD) {
+            // un pago se olvida cuando su próximo poll consultaría igual: olvidarlo no cambia nada.
             // remove(key, value) por dentro: un pago que recibe un poll mientras tanto se queda
-            pollsByTransaction.entrySet().removeIf(entry -> now - entry.getValue().lastPollNanos() >= newRoundGapNanos);
+            pollsByTransaction.entrySet().removeIf(entry -> queryIsDue(entry.getValue(), now));
         }
         return query[0];
+    }
+
+    /**
+     * Registra que la consulta al proveedor falló (red, timeout o error). La próxima espera
+     * {@link #MIN_INTERVAL_BETWEEN_QUERIES} desde la falla, aunque antes haya una pausa en los polls: con
+     * Banchile o la red caídos no se insiste más seguido. QA del 23-oct: durante una caída de red, con
+     * los polls intermitentes, cada pausa abría una tanda nueva y había consultas cada 5 s.
+     *
+     * @param transactionId id de la transacción de pago ({@code b_transaction.id})
+     */
+    public void queryFailed(int transactionId) {
+        long now = nanoTime.getAsLong();
+        pollsByTransaction.compute(transactionId, (id, previous) ->
+            new Polls(previous != null ? previous.lastPollNanos() : now, now, true));
+    }
+
+    /**
+     * @return true si el próximo poll del pago consulta: pasaron 10 s desde la última consulta (o desde
+     *         que falló), o, si no falló, hubo una pausa en los polls que abre una tanda nueva
+     */
+    private boolean queryIsDue(Polls polls, long now) {
+        return now - polls.lastQueryNanos() >= minIntervalNanos
+            || (!polls.lastQueryFailed() && now - polls.lastPollNanos() >= newRoundGapNanos);
     }
 
     /**

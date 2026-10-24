@@ -1896,6 +1896,35 @@ public class TicketReservationManager {
     }
 
     public Optional<PaymentResult> forceTransactionCheck(PurchaseContext purchaseContext, TicketReservation reservation) {
+        return forceTransactionCheckWithProviderResult(purchaseContext, reservation).map(ForcedTransactionCheck::paymentResult);
+    }
+
+    /**
+     * Resultado de {@link #forceTransactionCheckWithProviderResult}.
+     *
+     * @param providerResult lo que informó el proveedor: ERROR si no pudo consultar el estado del pago
+     * @param paymentResult  el resultado que devuelve {@link #forceTransactionCheck}
+     */
+    public record ForcedTransactionCheck(PaymentWebhookResult.Type providerResult, PaymentResult paymentResult) {
+
+        /**
+         * @return true si el proveedor no pudo consultar el estado del pago (red, timeout o error)
+         */
+        public boolean providerFailed() {
+            return providerResult == PaymentWebhookResult.Type.ERROR;
+        }
+    }
+
+    /**
+     * Como {@link #forceTransactionCheck}, y además dice qué informó el proveedor. forceTransactionCheck
+     * devuelve igual (pendiente) un pago que sigue pendiente y una consulta que falló; el poll de
+     * Banchile necesita distinguirlos, para que una consulta fallida cuente en su freno.
+     *
+     * @param purchaseContext contexto de compra de la reserva
+     * @param reservation     reserva con un pago pendiente
+     * @return el resultado, o vacío si la reserva no tiene una transacción PENDING o su proveedor no verifica pagos
+     */
+    public Optional<ForcedTransactionCheck> forceTransactionCheckWithProviderResult(PurchaseContext purchaseContext, TicketReservation reservation) {
         var optionalTransaction = transactionRepository.loadOptionalByReservationIdAndStatusForUpdate(reservation.getId(), Transaction.Status.PENDING);
         if(optionalTransaction.isEmpty()) {
             return Optional.empty();
@@ -1907,7 +1936,7 @@ public class TicketReservationManager {
                 var paymentWebhookResult = providerAndWebhookResult.getRight();
                 handlePaymentWebhookResult(purchaseContext, providerAndWebhookResult.getLeft(), paymentWebhookResult, reservation, transaction, paymentContext, "force-check", true);
 
-                return switch (paymentWebhookResult.getType()) {
+                var paymentResult = switch (paymentWebhookResult.getType()) {
                     case FAILED, REJECTED, CANCELLED -> PaymentResult.failed(paymentWebhookResult.getReason());
                     case NOT_RELEVANT, ERROR ->
                         // to be on the safe side, we ignore errors when trying to reload the payment
@@ -1917,7 +1946,7 @@ public class TicketReservationManager {
                         StringUtils.isNotEmpty(paymentWebhookResult.getRedirectUrl()) ? PaymentResult.redirect(paymentWebhookResult.getRedirectUrl()) : PaymentResult.pending(transaction.getPaymentId());
                     default -> PaymentResult.successful(paymentWebhookResult.getPaymentToken().getToken());
                 };
-
+                return new ForcedTransactionCheck(paymentWebhookResult.getType(), paymentResult);
             });
     }
 
