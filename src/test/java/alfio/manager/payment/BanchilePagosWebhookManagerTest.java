@@ -508,6 +508,188 @@ class BanchilePagosWebhookManagerTest {
     }
 
     /**
+     * La sesión 4724 del QA del 23-oct en el sandbox, con dos tarjetas rechazadas ("Reintentar pago"):
+     * Banchile lista primero el intento más reciente (Mastercard 0005, recibo 3885, 23:36:27) y después
+     * el anterior (VISA 0016, recibo 3884, 23:36:05), al revés del ejemplo APPROVED_PARTIAL de la
+     * referencia de la API. El orden, las fechas, las tarjetas y los recibos son los reales; las razones
+     * y los mensajes, no (no se informaron).
+     */
+    @Test
+    void inTheRealSession4724TheLastAttemptIsTheOneOf233627() {
+        var newest = attempt("REJECTED", null, "05", "Mastercard 0005, recibo 3885", "2026-10-23T23:36:27-03:00", "3885", "0005");
+        var previous = attempt("REJECTED", null, "?2", "VISA 0016, recibo 3884", "2026-10-23T23:36:05-03:00", "3884", "0016");
+
+        var metadata = metadataOfARejectedSessionWith(List.of(newest, previous));
+
+        assertEquals("REJECTED", metadata.get("banchile_attempt_status"));
+        assertEquals("05", metadata.get("banchile_attempt_reason"));
+        assertEquals("Mastercard 0005, recibo 3885", metadata.get("banchile_attempt_message"));
+    }
+
+    /**
+     * Dos tarjetas rechazadas en la misma sesión: el último intento es el de status.date más reciente,
+     * venga primero (como en Banchile, ver la sesión 4724) o último (como en el ejemplo de la API) en
+     * payment[].
+     */
+    @ParameterizedTest(name = "el más reciente va {0} en payment[]")
+    @CsvSource({"último", "primero"})
+    void theAttemptFieldsComeFromTheMostRecentAttemptWhateverItsPositionInTheList(String position) {
+        var older = rejectedAttempt(421692, "05", "Fondos insuficientes", "2026-10-15T12:20:10-03:00");
+        var newer = rejectedAttempt(421693, "?2", "Transacción declinada por políticas de control de riesgo", "2026-10-15T12:31:40-03:00");
+
+        var metadata = metadataOfARejectedSessionWith("último".equals(position) ? List.of(older, newer) : List.of(newer, older));
+
+        assertEquals("REJECTED", metadata.get("banchile_attempt_status"));
+        assertEquals("?2", metadata.get("banchile_attempt_reason"));
+        assertEquals("Transacción declinada por políticas de control de riesgo", metadata.get("banchile_attempt_message"));
+    }
+
+    /**
+     * Las fechas se comparan como instantes, no como texto, y mandan sobre internalReference: el
+     * intento de las 12:31:40-03:00 (15:31:40Z) es posterior al de las 15:20:10Z aunque su texto sea
+     * "menor" y su internalReference también.
+     */
+    @Test
+    void theDatesAreComparedAsInstants() {
+        var earlierInUtc = rejectedAttempt(421693, "05", "Fondos insuficientes", "2026-10-15T15:20:10Z");
+        var laterWithOffset = rejectedAttempt(421692, "?2", "Transacción declinada por políticas de control de riesgo", "2026-10-15T12:31:40-03:00");
+
+        var metadata = metadataOfARejectedSessionWith(List.of(earlierInUtc, laterWithOffset));
+
+        assertEquals("?2", metadata.get("banchile_attempt_reason"), "12:31:40-03:00 es 15:31:40Z, después de 15:20:10Z");
+    }
+
+    @ParameterizedTest(name = "el de mayor internalReference va {0} en payment[]")
+    @CsvSource({"último", "primero"})
+    void withoutDatesTheAttemptWithTheHighestInternalReferenceIsTheLast(String position) {
+        var older = rejectedAttempt(421692, "05", "Fondos insuficientes", null);
+        var newer = rejectedAttempt(421693, "?2", "Transacción declinada por políticas de control de riesgo", null);
+
+        var metadata = metadataOfARejectedSessionWith("último".equals(position) ? List.of(older, newer) : List.of(newer, older));
+
+        assertEquals("?2", metadata.get("banchile_attempt_reason"));
+    }
+
+    @ParameterizedTest(name = "el de mayor internalReference va {0} en payment[]")
+    @CsvSource({"último", "primero"})
+    void ifAnAttemptHasNoUsableDateTheHighestInternalReferenceIsTheLast(String position) {
+        var dated = rejectedAttempt(421692, "05", "Fondos insuficientes", "2026-10-15T12:20:10-03:00");
+        var undated = rejectedAttempt(421693, "?2", "Transacción declinada por políticas de control de riesgo", "no es una fecha");
+
+        var metadata = metadataOfARejectedSessionWith("último".equals(position) ? List.of(dated, undated) : List.of(undated, dated));
+
+        assertEquals("?2", metadata.get("banchile_attempt_reason"));
+    }
+
+    @ParameterizedTest(name = "el de mayor internalReference va {0} en payment[]")
+    @CsvSource({"último", "primero"})
+    void onATieTheHighestInternalReferenceIsTheLast(String position) {
+        var sameDate = "2026-10-15T12:31:40-03:00";
+        var lower = rejectedAttempt(421692, "05", "Fondos insuficientes", sameDate);
+        var higher = rejectedAttempt(421693, "?2", "Transacción declinada por políticas de control de riesgo", sameDate);
+
+        var metadata = metadataOfARejectedSessionWith("último".equals(position) ? List.of(lower, higher) : List.of(higher, lower));
+
+        assertEquals("?2", metadata.get("banchile_attempt_reason"));
+    }
+
+    /**
+     * Sin fechas que los distingan ni internalReference, manda el orden de Banchile: el primero de
+     * payment[] es el más reciente (sesión 4724).
+     */
+    @Test
+    void withoutDatesNorInternalReferencesTheFirstInTheListIsTheLast() {
+        var first = attempt("REJECTED", null, "05", "el primero de la lista", null, null, "0005");
+        var second = attempt("REJECTED", null, "?2", "el segundo de la lista", null, null, "0016");
+
+        var metadata = metadataOfARejectedSessionWith(List.of(first, second));
+
+        assertEquals("el primero de la lista", metadata.get("banchile_attempt_message"));
+    }
+
+    @Test
+    void withTheSameDateAndNoInternalReferencesTheFirstInTheListIsTheLast() {
+        var sameDate = "2026-10-23T23:36:27-03:00";
+        var first = attempt("REJECTED", null, "05", "el primero de la lista", sameDate, null, "0005");
+        var second = attempt("REJECTED", null, "?2", "el segundo de la lista", sameDate, null, "0016");
+
+        var metadata = metadataOfARejectedSessionWith(List.of(first, second));
+
+        assertEquals("el primero de la lista", metadata.get("banchile_attempt_message"));
+    }
+
+    /**
+     * El último intento solo decide los campos banchile_attempt_*: la autorización y los datos de la
+     * tarjeta siguen saliendo del intento APPROVED (selectPaymentDetails), como antes. El caso es el
+     * del ejemplo APPROVED_PARTIAL de la API: un pago parcial aprobado y después un intento rechazado;
+     * acá la sesión venció con el pago parcial (PARTIAL_EXPIRED).
+     */
+    @Test
+    void theApprovedAttemptStillProvidesTheAuthorizationAndTheCardDetails() {
+        var reservation = buildTicketReservation();
+        when(ticketReservationRepository.findOptionalStatusAndValidationById(RESERVATION_ID))
+            .thenReturn(Optional.of(new TicketReservationStatusAndValidation(TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT, true)));
+        var approvedPart = new SessionResponse.PaymentDetails(RESERVATION_ID,
+            new alfio.model.transaction.banchile.CreateSessionRequest.Amount("CLP", 5000L), "614515011049",
+            new SessionResponse.Status("APPROVED", "00", "Aprobada", "2026-10-15T12:20:10-03:00"),
+            421692, "visa", "Visa", "BANCO DE PRUEBA", "004393", "visa", false,
+            List.of(new SessionResponse.ProcessorField("lastDigits", "1111", "none")));
+        var rejectedRest = rejectedAttempt(421693, "?2", "Transacción declinada por políticas de control de riesgo", "2026-10-15T12:31:40-03:00");
+        when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL))).thenReturn(new SessionResponse(
+            new SessionResponse.Status("PARTIAL_EXPIRED", "EX", "La petición ha expirado", "2026-10-15T13:00:00-03:00"),
+            REQUEST_ID_INT, null, List.of(approvedPart, rejectedRest)));
+
+        manager.forceTransactionCheck(reservation, transaction, paymentContext);
+
+        var metadata = closedTransactionMetadata(Transaction.Status.FAILED);
+        assertEquals("004393", metadata.get("banchile_authorization"));
+        assertEquals("614515011049", metadata.get("banchile_receipt"));
+        assertEquals("1111", metadata.get("banchile_pf_lastDigits"));
+        assertEquals("REJECTED", metadata.get("banchile_attempt_status"));
+        assertEquals("?2", metadata.get("banchile_attempt_reason"));
+    }
+
+    /**
+     * Metadata con que se cierra una sesión que el comprador dejó con ?C, con los intentos dados.
+     */
+    private Map<String, String> metadataOfARejectedSessionWith(List<SessionResponse.PaymentDetails> attempts) {
+        var reservation = buildTicketReservation();
+        when(ticketReservationRepository.findOptionalStatusAndValidationById(RESERVATION_ID))
+            .thenReturn(Optional.of(new TicketReservationStatusAndValidation(TicketReservationStatus.EXTERNAL_PROCESSING_PAYMENT, true)));
+        when(banchilePagosClient.querySession(eq(REQUEST_ID_INT), any(Auth.class), eq(BASE_URL))).thenReturn(new SessionResponse(
+            new SessionResponse.Status("REJECTED", "?C", "La petición ha sido cancelada por el usuario", "2026-10-15T12:32:05-03:00"),
+            REQUEST_ID_INT, null, attempts));
+
+        assertEquals(PaymentWebhookResult.Type.FAILED, manager.forceTransactionCheck(reservation, transaction, paymentContext).getType());
+        return closedTransactionMetadata(Transaction.Status.FAILED);
+    }
+
+    /**
+     * Intento de pago rechazado por el banco, con autorización "000000" como los del sandbox.
+     *
+     * @param date status.date del intento, o null si no la trae
+     */
+    private static SessionResponse.PaymentDetails rejectedAttempt(int internalReference, String reason, String message, String date) {
+        return attempt("REJECTED", internalReference, reason, message, date, null, "0016");
+    }
+
+    /**
+     * Intento de pago con autorización "000000", como los rechazos del sandbox.
+     *
+     * @param internalReference internalReference, o null si no lo trae
+     * @param date              status.date, o null si no la trae
+     * @param receipt           recibo, o null
+     */
+    private static SessionResponse.PaymentDetails attempt(String status, Integer internalReference, String reason, String message,
+                                                          String date, String receipt, String lastDigits) {
+        return new SessionResponse.PaymentDetails(RESERVATION_ID,
+            new alfio.model.transaction.banchile.CreateSessionRequest.Amount("CLP", 10000L), receipt,
+            new SessionResponse.Status(status, reason, message, date),
+            internalReference, "visa", "Visa", "BANCO DE PRUEBA", "000000", "visa", false,
+            List.of(new SessionResponse.ProcessorField("lastDigits", lastDigits, "none")));
+    }
+
+    /**
      * La metadata con que se cerró la transacción.
      */
     private Map<String, String> closedTransactionMetadata(Transaction.Status status) {

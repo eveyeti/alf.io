@@ -64,7 +64,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.time.ZonedDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.regex.Pattern;
 
@@ -1617,9 +1620,7 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * Intento de pago del que se toman los detalles (recibo, autorización, medio de pago...).
      * Una sesión puede tener varios intentos (reintentos tras un rechazo): se prefiere el
      * APPROVED; si no hay, el reembolsado (Banchile puede informarlo con estado REFUNDED en vez
-     * de APPROVED); si tampoco hay, el primero disponible (útil para rechazos). Se asume que
-     * Banchile, como PlacetoPay, lista primero el intento más reciente, así que en un rechazo es el
-     * último intento; no está verificado con una sesión real de varios intentos.
+     * de APPROVED); si tampoco hay, el primero disponible (útil para rechazos).
      *
      * @param remoteSession respuesta de querySession, puede ser null
      * @return el intento elegido, o null si la sesión no tiene intentos de pago
@@ -1639,6 +1640,61 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
     }
 
     /**
+     * Intento de pago con su posición en payment[] y su status.date (null si no la trae o no se puede leer).
+     */
+    private record IndexedAttempt(SessionResponse.PaymentDetails attempt, int position, Instant date) {}
+
+    /**
+     * Último intento de pago de la sesión, del que salen los campos {@code banchile_attempt_*}: el de
+     * {@code status.date} más reciente. Si empatan, o si a algún intento le falta la fecha (o no se
+     * puede leer), el de mayor {@code internalReference}; y si también empatan, el que va primero en
+     * {@code payment[]}. Banchile lista primero el intento más reciente (sesión 4724 del QA del 23-oct:
+     * Mastercard 0005, recibo 3885, 23:36:27, antes que VISA 0016, recibo 3884, 23:36:05), al revés
+     * del ejemplo APPROVED_PARTIAL de la referencia de la API: por eso decide la fecha y no la posición.
+     *
+     * <p>Es solo para estos campos: la autorización y los datos de la tarjeta siguen saliendo de
+     * {@link #selectPaymentDetails} (el intento APPROVED, si hay), y las alertas también.
+     *
+     * @param remoteSession respuesta de querySession, puede ser null
+     * @return el último intento, o null si la sesión no tiene intentos de pago
+     */
+    private static SessionResponse.PaymentDetails lastPaymentAttempt(SessionResponse remoteSession) {
+        if (remoteSession == null || remoteSession.payment() == null) {
+            return null;
+        }
+        var attempts = new ArrayList<IndexedAttempt>();
+        for (int position = 0; position < remoteSession.payment().size(); position++) {
+            var attempt = remoteSession.payment().get(position);
+            if (attempt != null) {
+                attempts.add(new IndexedAttempt(attempt, position, attemptDate(attempt)));
+            }
+        }
+        Comparator<IndexedAttempt> byInternalReference = Comparator.comparing(
+            (IndexedAttempt a) -> a.attempt().internalReference(), Comparator.nullsFirst(Comparator.<Integer>naturalOrder()));
+        // el primero de payment[] es el más reciente: con todo lo demás igual, gana la posición más baja
+        Comparator<IndexedAttempt> byPosition = Comparator.comparingInt((IndexedAttempt a) -> a.position()).reversed();
+        boolean allDated = attempts.stream().allMatch(a -> a.date() != null);
+        Comparator<IndexedAttempt> recency = allDated
+            ? Comparator.comparing(IndexedAttempt::date).thenComparing(byInternalReference).thenComparing(byPosition)
+            : byInternalReference.thenComparing(byPosition);
+        return attempts.stream().max(recency).map(IndexedAttempt::attempt).orElse(null);
+    }
+
+    /**
+     * @return el {@code status.date} del intento como instante, o null si no lo trae o no es una fecha ISO-8601 con zona
+     */
+    private static Instant attemptDate(SessionResponse.PaymentDetails attempt) {
+        if (attempt.status() == null || StringUtils.isBlank(attempt.status().date())) {
+            return null;
+        }
+        try {
+            return OffsetDateTime.parse(attempt.status().date()).toInstant();
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    /**
      * Construye el {@code metadata Map<String,String>} que se persiste en
      * {@code b_transaction.metadata} (columna jsonb) con prefijo {@code banchile_*}.
      *
@@ -1647,10 +1703,10 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
      * {@code querySession} (ground truth remoto). Los detalles del pago salen del intento que
      * elige {@link #selectPaymentDetails}: el APPROVED, si no el reembolsado, si no el primero.
      *
-     * <p>El estado, la razón y el mensaje de ese intento van aparte de los de la sesión
-     * ({@code banchile_attempt_*}): con una tarjeta rechazada, Banchile deja la sesión abierta para
-     * reintentar y, si el comprador vuelve al comercio, la cierra REJECTED con razón ?C ("cancelada
-     * por el usuario"), aunque lo que pasó es que el banco rechazó el intento (QA del 15-oct).
+     * <p>El estado, la razón y el mensaje del último intento ({@link #lastPaymentAttempt}) van aparte
+     * de los de la sesión ({@code banchile_attempt_*}): con una tarjeta rechazada, Banchile deja la
+     * sesión abierta para reintentar y, si el comprador vuelve al comercio, la cierra REJECTED con razón
+     * ?C ("cancelada por el usuario"), aunque lo que pasó es que el banco rechazó el intento (QA del 15-oct).
      *
      * <p>Solo invocar en estados finales (COMPLETE / FAILED). En PENDING, preservar
      * intacto el metadata actual.
@@ -1704,12 +1760,6 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                 metadata.put("banchile_receipt", pd.receipt());
             if (Boolean.TRUE.equals(pd.refunded()))
                 metadata.put("banchile_refunded", "true");
-            if (pd.status() != null) {
-                var attempt = pd.status();
-                if (attempt.status() != null)  metadata.put("banchile_attempt_status", attempt.status());
-                if (attempt.reason() != null)  metadata.put("banchile_attempt_reason", attempt.reason());
-                if (attempt.message() != null) metadata.put("banchile_attempt_message", attempt.message());
-            }
 
             // Aplanar processorFields[] como banchile_pf_<keyword> = <value>
             // (solo cuando value es String — otros tipos se omiten para mantener Map<String,String>)
@@ -1720,6 +1770,14 @@ public class BanchilePagosWebhookManager implements PaymentProvider, WebhookHand
                     }
                 }
             }
+        }
+
+        SessionResponse.PaymentDetails lastAttempt = lastPaymentAttempt(remoteSession);
+        if (lastAttempt != null && lastAttempt.status() != null) {
+            var attempt = lastAttempt.status();
+            if (attempt.status() != null)  metadata.put("banchile_attempt_status", attempt.status());
+            if (attempt.reason() != null)  metadata.put("banchile_attempt_reason", attempt.reason());
+            if (attempt.message() != null) metadata.put("banchile_attempt_message", attempt.message());
         }
 
         return metadata;
