@@ -14,7 +14,9 @@ const SPANISH = {
   [KEY + 'cancelled']: 'Cancelaste el pago y no se hizo ningún cargo. Tu reserva sigue guardada: puedes volver a pagar antes de que venza.',
   [KEY + 'expired']: 'Se acabó el tiempo para pagar en Banchile y no se hizo ningún cargo. Tu reserva sigue guardada: '
     + 'puedes intentarlo de nuevo.',
-  [KEY + 'bank-detail']: 'Detalle del banco: {{0}}'
+  [KEY + 'bank-detail']: 'Detalle del banco: {{0}}',
+  [KEY + 'partial-expired']: 'El pago quedó incompleto y se acabó el tiempo para terminarlo. Tu reserva sigue guardada: '
+    + 'puedes intentarlo de nuevo.'
 };
 
 /** Los textos de public.properties (inglés), como los entrega /api/v2/public/i18n/bundle/en. */
@@ -25,7 +27,9 @@ const ENGLISH = {
     + 'you can pay again before it expires.',
   [KEY + 'expired']: 'The time to pay on Banchile ran out and you have not been charged. Your reservation is still on hold: '
     + 'you can try again.',
-  [KEY + 'bank-detail']: 'Message from the bank: {{0}}'
+  [KEY + 'bank-detail']: 'Message from the bank: {{0}}',
+  [KEY + 'partial-expired']: 'The payment was left incomplete and the time to finish it ran out. Your reservation is still on hold: '
+    + 'you can try again.'
 };
 
 describe('BanchileFailedPaymentNoticeComponent', () => {
@@ -136,8 +140,21 @@ describe('BanchileFailedPaymentNoticeComponent', () => {
       expect(text(notice)).toBe(SPANISH[KEY + 'expired']);
     });
 
-    it('pago parcial vencido: el texto del vencimiento', () => {
-      expect(text(render({status: 'PARTIAL_EXPIRED', statusReason: 'XN'}))).toBe(SPANISH[KEY + 'expired']);
+    it('pago parcial vencido: el texto del pago incompleto, que no dice que no hubo cargo', () => {
+      const notice = render({status: 'PARTIAL_EXPIRED', statusReason: 'EX', statusMessage: 'La petición ha expirado'});
+
+      expect(text(notice)).toBe(SPANISH[KEY + 'partial-expired']);
+      expect(text(notice)).not.toContain('ningún cargo');
+    });
+
+    it('pago parcial vencido con un último intento rechazado: igual el texto del pago incompleto (hubo un cargo parcial)', () => {
+      const notice = render({
+        status: 'PARTIAL_EXPIRED', statusReason: 'EX',
+        attemptStatus: 'REJECTED', attemptReason: '?2', attemptMessage: 'Transacción declinada por políticas de control de riesgo'
+      });
+
+      expect(text(notice)).toBe(SPANISH[KEY + 'partial-expired']);
+      expect(notice.querySelector('.failed-attempt-bank-detail')).toBeNull();
     });
 
     it('en el idioma de la página', () => {

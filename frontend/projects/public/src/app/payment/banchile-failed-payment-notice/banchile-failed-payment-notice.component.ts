@@ -17,7 +17,7 @@ const EXPIRED = 'EX';
 const KEY_PREFIX = 'reservation-page.payment.banchile.failed-attempt.';
 
 /** Por qué falló el intento: cada motivo tiene su texto. */
-export type FailedAttemptReason = 'rejected' | 'cancelled' | 'expired';
+export type FailedAttemptReason = 'rejected' | 'cancelled' | 'expired' | 'partial-expired';
 
 /**
  * Aviso del resumen de la reserva cuando el último intento de pago con Banchile falló. Depende del
@@ -32,6 +32,9 @@ export type FailedAttemptReason = 'rejected' | 'cancelled' | 'expired';
  * reintentar y, si el comprador vuelve al comercio, la cierra con ?C (o vence, EX). Si el último
  * intento fue rechazado, el aviso es el del rechazo del banco, con el mensaje de ese intento; solo sin
  * un intento rechazado cuenta la razón de la sesión.
+ *
+ * Un pago parcial vencido (PARTIAL_EXPIRED) tiene su propio texto, sin "no se hizo ningún cargo":
+ * una parte se pagó. Hoy no pasa, porque alf.io no pide pagos parciales a Banchile.
  */
 @Component({
   selector: 'app-banchile-failed-payment-notice',
@@ -58,10 +61,14 @@ export class BanchileFailedPaymentNoticeComponent {
     if (!this.failed) {
       return null;
     }
+    if (this.paymentDetails.status === 'PARTIAL_EXPIRED') {
+      // venció con una parte pagada: no vale "no se hizo ningún cargo", aunque el último intento fuera un rechazo
+      return 'partial-expired';
+    }
     if (this.attemptRejected) {
       return 'rejected';
     }
-    if (this.paymentDetails.status === 'PARTIAL_EXPIRED' || this.paymentDetails.statusReason === EXPIRED) {
+    if (this.paymentDetails.statusReason === EXPIRED) {
       return 'expired';
     }
     return this.paymentDetails.statusReason === CANCELLED_BY_THE_BUYER ? 'cancelled' : 'rejected';

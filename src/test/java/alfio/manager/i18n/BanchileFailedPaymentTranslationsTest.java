@@ -58,6 +58,8 @@ class BanchileFailedPaymentTranslationsTest {
         assertEquals("Se acabó el tiempo para pagar en Banchile y no se hizo ningún cargo. Tu reserva sigue guardada: puedes intentarlo de nuevo.",
             bundle.get(PREFIX + "expired"));
         assertEquals("Detalle del banco: {{0}}", bundle.get(PREFIX + "bank-detail"));
+        assertEquals("El pago quedó incompleto y se acabó el tiempo para terminarlo. Tu reserva sigue guardada: puedes intentarlo de nuevo.",
+            bundle.get(PREFIX + "partial-expired"));
     }
 
     @Test
@@ -70,6 +72,8 @@ class BanchileFailedPaymentTranslationsTest {
         assertEquals("The time to pay on Banchile ran out and you have not been charged. Your reservation is still on hold: "
             + "you can try again.", bundle.get(PREFIX + "expired"));
         assertEquals("Message from the bank: {{0}}", bundle.get(PREFIX + "bank-detail"));
+        assertEquals("The payment was left incomplete and the time to finish it ran out. Your reservation is still on hold: "
+            + "you can try again.", bundle.get(PREFIX + "partial-expired"));
     }
 
     @Test
@@ -82,6 +86,8 @@ class BanchileFailedPaymentTranslationsTest {
         assertEquals("Il tempo per pagare su Banchile è scaduto e non ti è stato addebitato nulla. La tua prenotazione è ancora valida: "
             + "puoi riprovare.", bundle.get(PREFIX + "expired"));
         assertEquals("Messaggio della banca: {{0}}", bundle.get(PREFIX + "bank-detail"));
+        assertEquals("Il pagamento è rimasto incompleto ed è scaduto il tempo per completarlo. La tua prenotazione è ancora valida: "
+            + "puoi riprovare.", bundle.get(PREFIX + "partial-expired"));
     }
 
     @Test
