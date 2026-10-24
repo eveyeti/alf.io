@@ -3,14 +3,14 @@ import {ActivatedRoute, Router} from '@angular/router';
 import {UntypedFormBuilder} from '@angular/forms';
 import {TranslateModule} from '@ngx-translate/core';
 import {NgbModal} from '@ng-bootstrap/ng-bootstrap';
-import {defer, of, throwError} from 'rxjs';
+import {defer, of, Subject, throwError} from 'rxjs';
 import {OverviewComponent} from './overview.component';
 import {ReservationService} from '../../shared/reservation.service';
 import {I18nService} from '../../shared/i18n.service';
 import {AnalyticsService} from '../../shared/analytics.service';
 import {PurchaseContextService} from '../../shared/purchase-context.service';
 import {FeedbackService} from '../../shared/feedback/feedback.service';
-import {ReservationInfo, ReservationStatus} from '../../model/reservation-info';
+import {ReservationInfo, ReservationStatus, ReservationStatusInfo} from '../../model/reservation-info';
 
 /**
  * Revisor (v6): volver con "Atrás" desde Banchile (bfcache).
@@ -126,5 +126,42 @@ describe('OverviewComponent al volver desde la página de pago (revisor v6)', ()
 
     expect(reservationService.getReservationInfo).not.toHaveBeenCalled();
     expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'success'], {replaceUrl: true});
+  });
+
+  /** Ronda 3: la política de reintentos con literales (el spec original la calcula con las mismas constantes). */
+  it('reintenta 2 veces, cada 2 s, antes de recargar', fakeAsync(() => {
+    const reload = spyOn(component, 'reloadPage');
+    let queries = 0;
+    reservationService.getReservationStatusInfo.and.returnValue(defer(() => {
+      queries++;
+      return throwError(() => new Error('sin red'));
+    }));
+    component.submitting = true;
+
+    backFromThePaymentPage();
+    expect(queries).toBe(1);
+    tick(1999);
+    expect(queries).toBe(1);
+    tick(1);
+    expect(queries).toBe(2);
+    tick(2000);
+    expect(queries).toBe(3);
+    expect(reload).toHaveBeenCalledTimes(1);
+  }));
+
+  /** Ronda 3: un pageshow nuevo cancela la consulta del anterior (si no, una respuesta vieja decidiría). */
+  it('un segundo "Atrás" cancela la consulta del primero', () => {
+    const first = new Subject<ReservationStatusInfo>();
+    const second = new Subject<ReservationStatusInfo>();
+    reservationService.getReservationStatusInfo.and.returnValues(first, second);
+    component.submitting = true;
+
+    backFromThePaymentPage();
+    backFromThePaymentPage();
+    first.next({status: 'EXTERNAL_PROCESSING_PAYMENT', validatedBookingInformation: true});
+
+    expect(router.navigate).not.toHaveBeenCalled();
+    second.next({status: 'PENDING', validatedBookingInformation: true});
+    expect(component.submitting).toBeFalse();
   });
 });
