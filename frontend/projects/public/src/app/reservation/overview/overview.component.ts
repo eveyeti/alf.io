@@ -1,4 +1,4 @@
-import {Component, ElementRef, HostListener, OnInit, ViewChild} from '@angular/core';
+import {Component, ElementRef, HostListener, OnDestroy, OnInit, ViewChild} from '@angular/core';
 import {ActivatedRoute, NavigationExtras, Router} from '@angular/router';
 import {ReservationService} from '../../shared/reservation.service';
 import {UntypedFormBuilder, UntypedFormGroup} from '@angular/forms';
@@ -17,7 +17,8 @@ import {AnalyticsService} from '../../shared/analytics.service';
 import {ErrorDescriptor, ValidatedResponse} from '../../model/validated-response';
 import {NgbModal} from '@ng-bootstrap/ng-bootstrap';
 import {ReservationExpiredComponent} from '../expired-notification/reservation-expired.component';
-import {zip} from 'rxjs';
+import {Subscription, zip} from 'rxjs';
+import {retry} from 'rxjs/operators';
 import {PurchaseContext} from '../../model/purchase-context';
 import {PurchaseContextService, PurchaseContextType} from '../../shared/purchase-context.service';
 import {ModalRemoveSubscriptionComponent} from '../modal-remove-subscription/modal-remove-subscription.component';
@@ -30,7 +31,12 @@ import {notifyPaymentErrorToParent} from '../../shared/util';
   templateUrl: './overview.component.html',
   styleUrls: ['./overview.component.scss']
 })
-export class OverviewComponent implements OnInit {
+export class OverviewComponent implements OnInit, OnDestroy {
+
+  /** Reintentos de la consulta del estado al volver desde la página de pago, antes de recargar la página. */
+  static readonly STATUS_RETRIES = 2;
+  /** Pausa entre esos reintentos. */
+  static readonly STATUS_RETRY_DELAY_MS = 2000;
 
   reservationInfo: ReservationInfo;
   overviewForm: UntypedFormGroup;
@@ -45,6 +51,7 @@ export class OverviewComponent implements OnInit {
   submitting: boolean;
   paymentStatusNotification: PaymentStatusNotification;
   private forceCheckInProgress = false;
+  private backFromThePaymentPageCheck: Subscription;
 
   selectedPaymentProvider: PaymentProvider;
 
@@ -237,14 +244,18 @@ export class OverviewComponent implements OnInit {
   /**
    * El navegador restauró la página desde su caché (bfcache), por ejemplo al volver con "Atrás" desde
    * Banchile: quedó tal como estaba al irse, con "Por favor, espere" y sin hacer ninguna petición.
-   * Vuelve a consultar el estado de la reserva y, con la respuesta, deja de esperar:
+   * Vuelve a consultar el estado de la reserva y, con la respuesta:
    * - con el pago en curso, pasa a "procesando pago", reemplazando esta entrada del historial para
    *   que "Adelante" siga llevando a la página de pago;
-   * - con la reserva de vuelta en PENDING (el pago ya falló), se queda acá y la recarga, con el aviso;
+   * - con la reserva de vuelta en PENDING (el pago ya falló), se queda acá, deja de esperar y la
+   *   recarga, con el aviso;
    * - con otro estado, va a la página de éxito y el guard lleva al comprador a la que corresponda.
    *
-   * Mientras llega la respuesta sigue "Por favor, espere": si el botón "Pagar" volviera antes, un
-   * segundo clic crearía otra sesión en Banchile y dejaría inválida la que el comprador estaba pagando.
+   * "Por favor, espere" sigue hasta que se sabe que la reserva está PENDING, o hasta que cambia la
+   * página: si el botón "Pagar" volviera antes, un segundo clic crearía otra sesión en Banchile y
+   * dejaría inválida la que el comprador estaba pagando. Si la consulta falla, la reintenta
+   * {@link STATUS_RETRIES} veces, cada {@link STATUS_RETRY_DELAY_MS} ms, y si sigue fallando recarga
+   * la página.
    *
    * @param event el pageshow; persisted es true solo si la página viene de la caché del navegador
    */
@@ -256,22 +267,42 @@ export class OverviewComponent implements OnInit {
     this.paymentStatusNotification = null;
     this.forceCheckInProgress = false;
     this.unregisterHook();
-    this.reservationService.getReservationStatusInfo(this.reservationId).subscribe({
-      next: status => {
-        this.submitting = false;
-        if (status.status === 'PENDING' && status.validatedBookingInformation) {
-          this.loadReservation();
-        } else {
-          const page = status.status === 'EXTERNAL_PROCESSING_PAYMENT' || status.status === 'WAITING_EXTERNAL_CONFIRMATION'
-            ? 'processing-payment' : 'success';
-          this.router.navigate([this.purchaseContextType, this.publicIdentifier, 'reservation', this.reservationId, page], {replaceUrl: true});
+    this.backFromThePaymentPageCheck?.unsubscribe();
+    this.backFromThePaymentPageCheck = this.reservationService.getReservationStatusInfo(this.reservationId)
+      .pipe(retry({count: OverviewComponent.STATUS_RETRIES, delay: OverviewComponent.STATUS_RETRY_DELAY_MS}))
+      .subscribe({
+        next: status => {
+          if (status.status === 'PENDING' && status.validatedBookingInformation) {
+            // solo acá vuelve "Pagar": el pago anterior ya terminó y la reserva espera otro
+            this.submitting = false;
+            this.loadReservation();
+          } else {
+            // sigue "Por favor, espere" hasta que cambie la página: mientras el guard consulta el
+            // estado, el resumen está en pantalla y "Pagar" crearía otra sesión en Banchile
+            const page = status.status === 'EXTERNAL_PROCESSING_PAYMENT' || status.status === 'WAITING_EXTERNAL_CONFIRMATION'
+              ? 'processing-payment' : 'success';
+            this.router.navigate([this.purchaseContextType, this.publicIdentifier, 'reservation', this.reservationId, page], {replaceUrl: true});
+          }
+        },
+        error: err => {
+          // sin saber si hay un pago en curso, "Pagar" no vuelve: la página recargada pasa por el guard,
+          // que muestra el resumen solo si la reserva está PENDING
+          console.log('could not reload the reservation status after coming back from the payment page', err);
+          this.reloadPage();
         }
-      },
-      error: err => {
-        console.log('could not reload the reservation status after coming back from the payment page', err);
-        this.submitting = false;
-      }
-    });
+      });
+  }
+
+  /**
+   * Recarga la página: el guard vuelve a consultar el estado de la reserva y elige la página.
+   */
+  reloadPage(): void {
+    window.location.reload();
+  }
+
+  ngOnDestroy(): void {
+    // si el comprador ya salió de la página, una consulta que todavía reintenta no la recarga
+    this.backFromThePaymentPageCheck?.unsubscribe();
   }
 
   forceCheck(): void {

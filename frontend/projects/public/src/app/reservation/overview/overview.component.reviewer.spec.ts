@@ -1,9 +1,9 @@
-import {ComponentFixture, TestBed} from '@angular/core/testing';
+import {ComponentFixture, fakeAsync, TestBed, tick} from '@angular/core/testing';
 import {ActivatedRoute, Router} from '@angular/router';
 import {UntypedFormBuilder} from '@angular/forms';
 import {TranslateModule} from '@ngx-translate/core';
 import {NgbModal} from '@ng-bootstrap/ng-bootstrap';
-import {of, throwError} from 'rxjs';
+import {defer, of, throwError} from 'rxjs';
 import {OverviewComponent} from './overview.component';
 import {ReservationService} from '../../shared/reservation.service';
 import {I18nService} from '../../shared/i18n.service';
@@ -78,30 +78,43 @@ describe('OverviewComponent al volver desde la página de pago (revisor v6)', ()
   }
 
   /**
-   * Documenta la carrera: con el pago en curso, el resumen deja de esperar (vuelve la fila del botón
-   * "Pagar") antes de que termine la navegación a "procesando pago". Un clic en ese momento llama a
-   * confirmOverview, que crea otra sesión en Banchile y deja INVALID la que el comprador estaba pagando.
+   * La carrera que encontró la revisión: con el pago en curso, el resumen dejaba de esperar (volvía la
+   * fila del botón "Pagar") antes de que terminara la navegación a "procesando pago". Un clic en ese
+   * momento llamaba a confirmOverview, que crea otra sesión en Banchile y deja INVALID la que el
+   * comprador estaba pagando. Ahora sigue en "Por favor, espere" hasta que cambia la página.
    */
-  it('documenta: con la navegación a "procesando pago" pendiente, el botón "Pagar" ya volvió', () => {
+  it('con la navegación a "procesando pago" pendiente, el botón "Pagar" no vuelve', () => {
     component.submitting = true;
     reservationStatusIs('EXTERNAL_PROCESSING_PAYMENT');
 
     backFromThePaymentPage();
 
     expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'processing-payment'], {replaceUrl: true});
-    expect(component.submitting).toBeFalse();
+    expect(component.submitting).toBeTrue();
   });
 
-  /** Lo mismo si falla la consulta del estado: el resumen viejo queda con "Pagar" aunque el pago siga en curso. */
-  it('documenta: si falla la consulta del estado, el botón "Pagar" vuelve sin saber si hay un pago en curso', () => {
+  /**
+   * Lo mismo si falla la consulta del estado: no se sabe si hay un pago en curso, así que no vuelve
+   * "Pagar". Reintenta y, si sigue fallando, recarga la página: el guard consulta el estado de nuevo y
+   * solo muestra el resumen, con "Pagar", si la reserva está PENDING.
+   */
+  it('si falla la consulta del estado, el botón "Pagar" no vuelve: reintenta y después recarga la página', fakeAsync(() => {
+    const reload = spyOn(component, 'reloadPage');
+    let queries = 0;
+    reservationService.getReservationStatusInfo.and.returnValue(defer(() => {
+      queries++;
+      return throwError(() => new Error('sin red'));
+    }));
     component.submitting = true;
-    reservationService.getReservationStatusInfo.and.returnValue(throwError(() => new Error('sin red')));
 
     backFromThePaymentPage();
+    tick(OverviewComponent.STATUS_RETRY_DELAY_MS * OverviewComponent.STATUS_RETRIES);
 
+    expect(queries).toBe(1 + OverviewComponent.STATUS_RETRIES);
+    expect(reload).toHaveBeenCalledTimes(1);
     expect(router.navigate).not.toHaveBeenCalled();
-    expect(component.submitting).toBeFalse();
-  });
+    expect(component.submitting).toBeTrue();
+  }));
 
   /** PENDING sin los datos de la reserva validados: no se queda en el resumen (mata la mutación F09). */
   it('con la reserva en PENDING pero sin los datos validados, deja que el guard elija la página', () => {

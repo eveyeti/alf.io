@@ -1,9 +1,9 @@
-import {ComponentFixture, TestBed} from '@angular/core/testing';
+import {ComponentFixture, fakeAsync, TestBed, tick} from '@angular/core/testing';
 import {ActivatedRoute, Router} from '@angular/router';
 import {UntypedFormBuilder} from '@angular/forms';
 import {TranslateModule} from '@ngx-translate/core';
 import {NgbModal} from '@ng-bootstrap/ng-bootstrap';
-import {of, Subject, throwError} from 'rxjs';
+import {defer, of, Subject, throwError} from 'rxjs';
 import {OverviewComponent} from './overview.component';
 import {ReservationService} from '../../shared/reservation.service';
 import {I18nService} from '../../shared/i18n.service';
@@ -73,15 +73,15 @@ describe('OverviewComponent al volver desde la página de pago', () => {
     window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted}));
   }
 
-  it('deja de esperar y pasa a "procesando pago" si el pago sigue en curso, sin perder el Adelante a Banchile', () => {
+  it('pasa a "procesando pago" si el pago sigue en curso, sin perder el Adelante a Banchile y sin que vuelva "Pagar"', () => {
     component.submitting = true;
     reservationStatusIs('EXTERNAL_PROCESSING_PAYMENT');
 
     backFromThePaymentPage();
 
-    expect(component.submitting).toBeFalse();
     expect(reservationService.getReservationStatusInfo).toHaveBeenCalledWith('r1');
     expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'processing-payment'], {replaceUrl: true});
+    expect(component.submitting).toBeTrue();
   });
 
   it('también con la reserva esperando la confirmación externa', () => {
@@ -112,6 +112,7 @@ describe('OverviewComponent al volver desde la página de pago', () => {
     backFromThePaymentPage();
 
     expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'success'], {replaceUrl: true});
+    expect(component.submitting).toBeTrue();
   });
 
   it('quita el aviso de "salir de la página" que se pone al pagar', () => {
@@ -124,7 +125,7 @@ describe('OverviewComponent al volver desde la página de pago', () => {
     expect(removeEventListener).toHaveBeenCalledWith('beforeunload', jasmine.any(Function));
   });
 
-  it('sigue esperando hasta saber el estado, para que no vuelva el botón "Pagar" con el pago en curso', () => {
+  it('sigue esperando mientras consulta el estado, y "Pagar" vuelve solo si la reserva está PENDING', () => {
     const answer = new Subject<ReservationStatusInfo>();
     reservationService.getReservationStatusInfo.and.returnValue(answer);
     component.submitting = true;
@@ -132,20 +133,52 @@ describe('OverviewComponent al volver desde la página de pago', () => {
     backFromThePaymentPage();
     expect(component.submitting).toBeTrue();
 
-    answer.next({status: 'EXTERNAL_PROCESSING_PAYMENT', validatedBookingInformation: true});
+    answer.next({status: 'PENDING', validatedBookingInformation: true});
     expect(component.submitting).toBeFalse();
-    expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'processing-payment'], {replaceUrl: true});
+    expect(router.navigate).not.toHaveBeenCalled();
   });
 
-  it('si no se puede consultar el estado, deja de esperar igual', () => {
+  it('si la consulta del estado falla una vez, la reintenta y sigue con la respuesta', fakeAsync(() => {
+    const reload = spyOn(component, 'reloadPage');
+    let queries = 0;
+    reservationService.getReservationStatusInfo.and.returnValue(defer(() => ++queries === 1
+      ? throwError(() => new Error('sin conexión'))
+      : of<ReservationStatusInfo>({status: 'EXTERNAL_PROCESSING_PAYMENT', validatedBookingInformation: true})));
+    component.submitting = true;
+
+    backFromThePaymentPage();
+    expect(router.navigate).not.toHaveBeenCalled();
+    tick(OverviewComponent.STATUS_RETRY_DELAY_MS);
+
+    expect(queries).toBe(2);
+    expect(router.navigate).toHaveBeenCalledWith(['event', 'bingo', 'reservation', 'r1', 'processing-payment'], {replaceUrl: true});
+    expect(reload).not.toHaveBeenCalled();
+    expect(component.submitting).toBeTrue();
+  }));
+
+  it('si la consulta del estado sigue fallando, recarga la página en vez de mostrar "Pagar"', fakeAsync(() => {
+    const reload = spyOn(component, 'reloadPage');
     reservationService.getReservationStatusInfo.and.returnValue(throwError(() => new Error('sin conexión')));
     component.submitting = true;
 
     backFromThePaymentPage();
+    tick(OverviewComponent.STATUS_RETRY_DELAY_MS * OverviewComponent.STATUS_RETRIES);
 
-    expect(component.submitting).toBeFalse();
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(component.submitting).toBeTrue();
     expect(router.navigate).not.toHaveBeenCalled();
-  });
+  }));
+
+  it('si se sale de la página mientras reintenta, no recarga después', fakeAsync(() => {
+    const reload = spyOn(component, 'reloadPage');
+    reservationService.getReservationStatusInfo.and.returnValue(throwError(() => new Error('sin conexión')));
+
+    backFromThePaymentPage();
+    fixture.destroy();
+    tick(OverviewComponent.STATUS_RETRY_DELAY_MS * OverviewComponent.STATUS_RETRIES);
+
+    expect(reload).not.toHaveBeenCalled();
+  }));
 
   it('una carga normal de la página no hace nada', () => {
     component.submitting = true;
